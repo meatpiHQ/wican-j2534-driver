@@ -1,0 +1,28 @@
+Windows Registry Editor Version 5.00
+
+; Registers the WiCAN J2534 device so PassThru applications discover it.
+; 1. Edit the two "..." paths below to where you copied wican_j2534.dll.
+; 2. Set Host/Port to reach WiCAN (default = its SoftAP gateway).
+; 3. Double-click to import (needs admin).
+;
+; 32-bit apps on 64-bit Windows read WOW6432Node — the second block covers
+; them. Keep both in sync.
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\PassThruSupport.04.04\WiCAN]
+"Name"="WiCAN"
+"Vendor"="meatpi"
+"FunctionLibrary"="C:\\Program Files\\WiCAN\\wican_j2534.dll"
+"CAN"=dword:00000001
+"ISO15765"=dword:00000001
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\PassThruSupport.04.04\WiCAN]
+"Name"="WiCAN"
+"Vendor"="meatpi"
+"FunctionLibrary"="C:\\Program Files\\WiCAN\\wican_j2534.dll"
+"CAN"=dword:00000001
+"ISO15765"=dword:00000001
+
+; DLL runtime config: where to reach WiCAN over IP.
+[HKEY_LOCAL_MACHINE\SOFTWARE\WiCAN\J2534]
+"Host"="192.168.80.1"
+"Port"=dword:00001a99
