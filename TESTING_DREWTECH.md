@@ -106,13 +106,18 @@ Launch `DrewTech_J2534-1.exe`.
    - **Apply**. → `PassThruStartMsgFilter`. WiCAN logs
      `ISO15765 channel bound tx 7E0 rx 7E8`; this is what binds the ISO-TP
      addressing.
-5. **Messages tab:** protocol ISO15765, Scratch Pad `10 02`, **Send**.
-   → `PassThruWriteMsgs` + `PassThruReadMsgs`. Expect `50 02 ...` in the RX
-   list. Try `27 01` → `67 01` + 4-byte seed; `27 02 <key>` → `67 02`.
+5. **Messages tab:** protocol ISO15765, Scratch Pad `00 00 07 E0 10 02`,
+   **Send**. → `PassThruWriteMsgs` + `PassThruReadMsgs`. Expect
+   `00 00 07 E8 50 02 ...` in the RX list, preceded by the TxDone
+   indication (RxStatus 0x09, data `00 00 07 E0`). Try `00 00 07 E0 27 01`
+   → `... 67 01` + 4-byte seed; `00 00 07 E0 27 02 <key>` → `... 67 02`.
 
-DrewTech sends the ISO15765 payload **without** a leading 4-byte CAN id —
-it relies on the flow-control filter for addressing, matching WiCAN's
-convention — so no id-prefix handling is needed.
+The scratch pad is the raw PASSTHRU_MSG `Data` field: SAE J2534-1 puts the
+4-byte CAN id in front of an ISO15765 payload, both ways, and WiCAN
+follows that since 2026-10-19. (The 2026-07-08 run typed `10 02` without
+the id and the firmware of that time happened to accept the bare payload;
+that reading was wrong, and udsoncan and the OEM suites, which always send
+the id, timed out against it: the field report of 2026-10-19.)
 
 ---
 
@@ -159,8 +164,34 @@ closed by default:
   memory-transfer services (RequestDownload/Upload, TransferData,
   TransferExit). A tool can read and diagnose, but cannot write ECU
   firmware. Open it only for a real reflash job.
-- **`allow_lan` (default false)** — connections are accepted only on
+- **`allow_lan` (default false)** - connections are accepted only on
   WiCAN's SoftAP and USB-device link (someone physically at the device).
   Connections arriving over WiFi-STA or a USB-Ethernet uplink (a shared
   "shop LAN") are refused, because the transport is unauthenticated. Open
   it only on a trusted network.
+
+---
+
+## 7. J1850 VPW (GM Class 2), driver 1.3
+
+VPW runs on WiCAN's OBD chip, not the CAN controller, so validating it
+needs a J1850 VPW node on the bus (a GM vehicle, or a VPW-capable ECU /
+bench node), which the CAN-only ECU simulator cannot provide. In the
+DrewTech tool:
+
+1. **Connect** with Protocol `J1850VPW` (1); BaudRate and flags are
+   ignored. The device runs the VPW init on the chip. CONNECT returns
+   `ERR_FAILED` if the OBD chip is not ready.
+2. **WriteMsgs** a J1850 message in `Data`: the 3-byte header (priority,
+   target, source, e.g. `68 6A F1`) followed by the payload (e.g. `01 00`
+   for mode 01 PID 00). No CAN-id prefix.
+3. **ReadMsgs** returns each J1850 reply as `[3-byte header][payload]`
+   (e.g. `.. .. .. 41 00 ..`), and a TxDone echo (RxStatus with
+   `TX_MSG_TYPE | TX_INDICATION`) carrying the request header.
+4. **StartMsgFilter** PASS over the header (mask `00 FF 00`, pattern
+   `00 F0 00`) narrows replies to the tester address F0.
+
+The firmware bench `tools/testbench/usb/j2534_vpw_bench.py` drives the same
+sequence over the wire protocol and prints `J2534 VPW PASS` / `SKIP` /
+`FAIL`. Programming a GM module runs at 10.4 kbit/s (4x speed is not
+implemented) with `allow_reflash` on.

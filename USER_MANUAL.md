@@ -16,18 +16,23 @@ that DLL (`wican_j2534.dll`); it forwards the J2534 calls over the
 network to the WiCAN firmware, which drives the CAN bus.
 
 **Supported**
-- Protocols: **CAN** and **ISO15765** (ISO-TP) — the diagnostics and UDS
-  reflash used by modern (≈2008+) vehicles.
+- Protocols: **CAN** and **ISO15765** (ISO-TP) on WiCAN's CAN controller
+  (the diagnostics and UDS reflash used by 2008-and-later vehicles), and
+  **J1850 VPW** (GM Class 2) on WiCAN's OBD chip (older GM vehicles). A
+  J1850 message is its 3-byte header plus the payload, no CAN id; WiCAN
+  segments large transfers itself. J1850 VPW is request/response only and
+  runs at the standard 10.4 kbit/s (GM 4x programming speed is not
+  implemented).
 - The full PassThru call set a real tool uses: `PassThruOpen / Close /
   Connect / Disconnect`, `ReadMsgs / WriteMsgs`, `StartMsgFilter /
   StopMsgFilter` (including **FLOW_CONTROL** filters for ISO-TP),
   `StartPeriodicMsg / StopPeriodicMsg` (tester-present), `Ioctl`
   (`READ_VBATT`, the `CLEAR_*` buffers), `ReadVersion`, `GetLastError`.
 
-**Not supported** (by design — WiCAN is CAN hardware)
-- Non-CAN protocols (J1850, ISO9141, KWP2000 over K-line, SCI…) →
-  `ERR_NOT_SUPPORTED`.
-- `SetProgrammingVoltage` (no pin-control hardware) → `ERR_NOT_SUPPORTED`.
+**Not supported**
+- J1850 PWM, ISO9141 and ISO14230 (KWP2000 over K-line), SCI: these answer
+  `ERR_NOT_SUPPORTED` (chip-wired on the hardware, not built yet).
+- `SetProgrammingVoltage` (no pin-control hardware): `ERR_NOT_SUPPORTED`.
 
 **Validated:** passed the free **DrewTech "Tool for J2534-1 API"**
 conformance app over both USB and WiFi — Open, ReadVersion, Connect
@@ -194,7 +199,7 @@ Any J2534 tool works the same way. Below is the flow using the free
    see:
    - Supported Protocols: `CAN, ISO15765`
    - Device Firmware Version: `WiCAN v6`
-   - J2534 DLL Version: `WiCAN J2534 1.1`
+   - J2534 DLL Version: `WiCAN J2534 1.2`
    - SAE J2534 API Version: `04.04`
 3. **Connect.** Protocol **ISO15765**, Baud **500000**, Connect. →
    `PassThruConnect`.
@@ -210,10 +215,15 @@ Any J2534 tool works the same way. Below is the flow using the free
      request/response IDs).
    - Apply. → `PassThruStartMsgFilter`. WiCAN logs
      `ISO15765 channel bound tx 7E0 rx 7E8`.
-5. **Send/receive.** Protocol ISO15765, send `10 02` → expect `50 02 …`;
-   `27 01` → `67 01` + seed; and so on. The tool sends the ISO15765
-   payload **without** a leading 4-byte CAN id and relies on the
-   flow-control filter for addressing, which matches WiCAN's convention.
+5. **Send/receive.** Protocol ISO15765, send `00 00 07 E0 10 02` → expect
+   `00 00 07 E8 50 02 …`; `00 00 07 E0 27 01` → `… 67 01` + seed; and so
+   on. An ISO15765 message carries the CAN id in its first 4 data bytes,
+   both ways, exactly as SAE J2534-1 lays it out (the DrewTech scratch
+   pad is the raw `Data` field, so type the id yourself). After each
+   transmit the RX list also shows a TxDone indication (RxStatus 0x09,
+   the id alone) and, for a long answer, a START_OF_MESSAGE one (0x02).
+   Firmware before 2026-10-19 expected the bare payload instead; every
+   standard tool timed out against it.
 
 That's the whole loop: **Open → Connect → Flow-Control filter →
 Write/Read**. OEM reflash apps do the same, plus periodic tester-present
@@ -293,6 +303,8 @@ CAN bus (e.g. `pcan_reflash_ecu.py`, request `0x7E0` / response `0x7E8`).
 | Reflash services rejected (`0x34/36/37` fail) | `allow_reflash` is `false` (default). Enable it only for an intended reflash (§7). |
 | Data looks wrong / cross-talk on the bus | An `autopid` group polling the same bus can interleave with the tester. Disable autopid while running J2534. |
 | Flow-Control column greyed out | You're on a **CAN** channel; flow control is ISO15765-only. Connect an ISO15765 channel for ISO-TP. |
+| Every ISO15765 request times out although the car answers other tools | The WiCAN firmware predates 2026-10-20: it expected the bare UDS payload instead of the J2534-1 layout (the 4-byte CAN id first). Update the firmware; the driver is unchanged. |
+| You need to see what the tool really sends | Set `WICAN_J2534_LOG=C:\path\wican_j2534.log` (or the registry `LogFile`) before starting the tool, reproduce, and read or send the log: every call, its bytes and the device's answer are in it (§11). |
 
 ---
 
@@ -301,7 +313,12 @@ CAN bus (e.g. `pcan_reflash_ecu.py`, request `0x7E0` / response `0x7E8`).
 - **Ports/IPs:** TCP **6809**; USB-device `192.168.82.1`, AP
   `192.168.80.1`. USB-serial: COM port, VID `16D0` PID `1263`.
 - **Version strings** (`PassThruReadVersion`): firmware `WiCAN v6`, DLL
-  `WiCAN J2534 1.1`, API `04.04`.
+  `WiCAN J2534 1.2`, API `04.04`.
+- **Debug log:** set the environment variable `WICAN_J2534_LOG` to a file
+  path (or the registry value `LogFile` under `HKLM\SOFTWARE\WiCAN\J2534`,
+  `WOW6432Node` for 32-bit tools) and the DLL appends one line per call:
+  the bytes written, every message read with its RxStatus, every status.
+  The same lines go to `OutputDebugString` (DebugView) always.
 - **Protocols:** CAN, ISO15765. **Baud:** 500000 typical (match the
   bus).
 - **Exports:** the 14 `PassThru*` functions (see `wican_j2534.def`).

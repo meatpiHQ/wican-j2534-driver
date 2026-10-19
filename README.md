@@ -13,14 +13,43 @@ two transports to the firmware's `j2534_server`:
 
 ## What it supports
 
-- Protocols **CAN** and **ISO15765** (ISO-TP) — the CAN-bus diagnostics
-  and UDS reflash that modern (2008+) vehicles use. Other protocols return
-  `ERR_NOT_SUPPORTED` (WiCAN is CAN hardware).
+- Protocols **CAN** and **ISO15765** (ISO-TP) on WiCAN's CAN controller
+  (the diagnostics and UDS reflash that 2008+ vehicles use), and **J1850
+  VPW** (GM Class 2) on WiCAN's OBD chip. J1850 PWM, ISO9141 and ISO14230
+  return `ERR_NOT_SUPPORTED` (chip-wired on the hardware, not built yet).
 - `PassThruOpen/Close/Connect/Disconnect`, `ReadMsgs/WriteMsgs`,
   `StartMsgFilter/StopMsgFilter` (incl. FLOW_CONTROL for ISO-TP),
   `StartPeriodicMsg/StopPeriodicMsg` (tester present), `Ioctl`
   (READ_VBATT, CLEAR_*), `ReadVersion`, `GetLastError`.
 - `SetProgrammingVoltage` → `ERR_NOT_SUPPORTED` (no pin-control hardware).
+
+Messages are copied verbatim both ways. An ISO15765 PASSTHRU_MSG carries the
+4-byte CAN id in `Data[0..3]` and the UDS payload after it, in both
+directions, as SAE J2534-1 says; the WiCAN firmware of 2026-10-20 or later
+speaks that layout (older firmware took the bare payload, and every standard
+tool timed out on its first request: the field report of 2026-10-19). A
+J1850 VPW PASSTHRU_MSG carries the 3-byte header and the payload whole, with
+no CAN-id prefix; the DLL passes it through the same way.
+
+## Versions
+
+- **1.3 (2026-10-19)**: accepts the **J1850 VPW** protocol (id 1, GM Class
+  2), which the firmware runs on the OBD chip; the DLL only adds it to the
+  `PassThruConnect` accept list and passes its `[3-byte header][payload]`
+  messages through verbatim (no CAN-id prefix). No other behaviour changed.
+- **1.2 (2026-10-19)**: the ACK wait is event-driven (the 10 ms sleep poll
+  put a 10 to 16 ms floor under every message); a debug log
+  (`WICAN_J2534_LOG=<file>` or the registry `LogFile`) records every call
+  with its bytes and status, and every line also goes to `OutputDebugString`;
+  an empty `PassThruReadMsgs` stays `ERR_BUFFER_EMPTY` whatever the `Timeout`
+  (SAE J2534-1 names `ERR_TIMEOUT` there, but udsoncan 1.26's reader takes
+  `ERR_TIMEOUT` as data and fails on empty payloads: bench-hit); `GET_CONFIG` fills the
+  values the device runs with (DATA_RATE from CONNECT, LOOPBACK 0,
+  ISO15765_BS 8, ISO15765_STMIN 1); requests are serialized across threads;
+  the ACK wait is 8 s (the device's longest WRITE, a multi-frame send at a
+  slow STmin, is capped at 5.5 s).
+- **1.1 (2026-07-18)**: the USB CDC-ACM serial transport, the installer.
+- **1.0 (2026-07-08)**: TCP, CAN + ISO15765, validated with the DrewTech tool.
 
 ## Build
 
@@ -122,6 +151,6 @@ passes, the DLL against the same device will too.
 | `CMakeLists.txt` | build |
 | `installer/` | end-user setup.exe (Inno Setup script + build_installer.ps1) |
 
-> The wire protocol is the contract in
-> `components/j2534_server/TASK_j2534_server.md §4`. Change one side, change
-> both (and bump `WW_VERSION`).
+> The wire protocol is the contract in the firmware's
+> `components/j2534_server/J2534_WIRE_PROTOCOL.md`. Change one side, change
+> both (and bump `WW_VERSION` when the bytes change).

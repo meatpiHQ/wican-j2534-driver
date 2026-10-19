@@ -1,9 +1,9 @@
 /*
- * wican_j2534.c — SAE J2534 PassThru DLL for WiCAN.
+ * wican_j2534.c: SAE J2534 PassThru DLL for WiCAN.
  *
  * Translates the J2534 API into the WiCAN wire protocol (wican_wire.h)
  * over one of two transports carrying the same framed protocol:
- *   - TCP: WiCAN reachable by IP — WiFi (STA or the device AP),
+ *   - TCP: WiCAN reachable by IP, WiFi (STA or the device AP),
  *     USB-Ethernet, or USB device NCM/RNDIS.
  *   - Serial: WiCAN as a USB CDC-ACM virtual COM port
  *     (usb_host_manager.role=device, device_class=cdc; VID 16D0 PID 1263).
@@ -13,15 +13,31 @@
  *   - env WICAN_J2534_HOST / WICAN_J2534_PORT  -> TCP (COMn value -> serial)
  *   - registry HKLM\SOFTWARE\WiCAN\J2534 :
  *       Transport (REG_SZ "tcp"|"serial"), ComPort (REG_SZ, ""/"auto" =
- *       find by USB VID/PID), Host (REG_SZ; "COMn" -> serial), Port (DWORD)
+ *       find by USB VID/PID), Host (REG_SZ; "COMn" -> serial), Port (DWORD),
+ *       LogFile (REG_SZ, optional)
  *   - default 192.168.80.1 : 6809  (WiCAN SoftAP gateway)
  *
- * RX model: WiCAN pushes RX_MSG frames; one reader thread owns the
- * transport read side and dispatches — ACK frames wake the pending
- * request, RX_MSG frames go to a per-channel ring that PassThruReadMsgs
- * drains (networked-J2534 pattern; identical over serial).
+ * Debug log: env WICAN_J2534_LOG=<file> (or the registry LogFile) appends
+ * one line per API call with its bytes and status; every line also goes to
+ * OutputDebugString (DebugView). Off when neither is set.
  *
- * Build: CMakeLists.txt (MSVC or MinGW). 32-bit is the safe default —
+ * RX model: WiCAN pushes RX_MSG frames; one reader thread owns the
+ * transport read side and dispatches: ACK frames wake the pending
+ * request (an event), RX_MSG frames go to a per-channel ring that
+ * PassThruReadMsgs drains (networked-J2534 pattern; identical over serial).
+ *
+ * Messages are copied verbatim both ways: the ISO15765 layout (the 4-byte
+ * CAN id first, then the payload, SAE J2534-1) is the device's business
+ * (firmware of 2026-10-20 or later; older firmware took the bare payload
+ * and every standard tool timed out).
+ *
+ * 1.2 (2026-10-19): event-driven ACK wait (the 10 ms sleep poll put a
+ * 10 to 16 ms floor under every message), the debug log, GET_CONFIG
+ * answers, requests serialized across threads. An empty read stays
+ * ERR_BUFFER_EMPTY whatever the Timeout: udsoncan's released reader takes
+ * ERR_TIMEOUT as data.
+ *
+ * Build: CMakeLists.txt (MSVC or MinGW). 32-bit is the safe default:
  * most OEM J2534 apps load a 32-bit DLL.
  */
 #ifndef _WIN32_WINNT
@@ -33,6 +49,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,9 +63,12 @@
 
 #define J2534_MAX_CH  8
 #define RX_RING       256
-#define DLL_VERSION   "WiCAN J2534 1.1"
+#define DLL_VERSION   "WiCAN J2534 1.3"
+/* longer than the device's longest WRITE (a multi-frame send at a slow
+ * STmin is capped at 5.5 s on the device side) */
+#define ACK_WAIT_MS   8000
 
-/* USB ids of the WiCAN CDC-ACM function (WICAN_USB_DEV_PID_CDC) — what
+/* USB ids of the WiCAN CDC-ACM function (WICAN_USB_DEV_PID_CDC): what
  * "auto" COM-port discovery matches in the Enum tree. Prefix, not exact:
  * CDC-ACM is a composite device, so the serial child enumerates under
  * VID_16D0&PID_1263&MI_00 (bench-hit 2026-07-18). */
@@ -67,12 +87,14 @@ typedef struct {
     HANDLE rd_ev, wr_ev;      /* per-direction OVERLAPPED events */
     volatile int connected;
     unsigned seq;
-    CRITICAL_SECTION tx_cs;
+    CRITICAL_SECTION tx_cs;   /* the write of one request */
+    CRITICAL_SECTION req_cs;  /* one request/ACK cycle at a time */
 
     HANDLE reader;
     volatile int reader_run;
 
     /* ACK handoff from the reader thread to transact() */
+    HANDLE                 ack_ev;      /* auto-reset: an ACK (or the link's end) */
     volatile unsigned      await_seq;
     volatile int           ack_ready;
     volatile unsigned long ack_status;
@@ -80,6 +102,7 @@ typedef struct {
 
     rx_ring_t     ring[J2534_MAX_CH];
     unsigned long ch_proto[J2534_MAX_CH];
+    unsigned long ch_baud[J2534_MAX_CH];
     int           ch_open[J2534_MAX_CH];
 } device_t;
 
@@ -89,6 +112,61 @@ static char g_last_error[256] = "no error";
 
 static void set_err(const char *m)
 { strncpy(g_last_error, m, sizeof(g_last_error) - 1); g_last_error[sizeof(g_last_error)-1] = 0; }
+
+/* ---- debug log --------------------------------------------------------- */
+
+static FILE *g_log;                 /* NULL = file logging off */
+static CRITICAL_SECTION g_log_cs;
+static int g_log_cs_ready;
+
+static void log_open(const char *path)
+{
+    if (!g_log_cs_ready) { InitializeCriticalSection(&g_log_cs); g_log_cs_ready = 1; }
+    if (g_log || !path || !path[0]) return;
+    g_log = fopen(path, "a");
+}
+
+static void log_close(void)
+{
+    if (g_log) { fclose(g_log); g_log = NULL; }
+}
+
+static void log_line(const char *fmt, ...)
+{
+    char line[600];
+    SYSTEMTIME st;
+    va_list ap;
+    int n;
+
+    GetLocalTime(&st);
+    n = _snprintf(line, sizeof(line), "%02d:%02d:%02d.%03d [%lu] ",
+                  st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+                  (unsigned long)GetCurrentThreadId());
+    if (n < 0 || n >= (int)sizeof(line)) n = 0;
+    va_start(ap, fmt);
+    _vsnprintf(line + n, sizeof(line) - n - 2, fmt, ap);
+    va_end(ap);
+    line[sizeof(line) - 2] = 0;
+    strcat(line, "\n");
+    OutputDebugStringA(line);
+    if (g_log && g_log_cs_ready) {
+        EnterCriticalSection(&g_log_cs);
+        fputs(line, g_log);
+        fflush(g_log);
+        LeaveCriticalSection(&g_log_cs);
+    }
+}
+
+/* the first 16 bytes of a message as hex, "..." when there are more */
+static const char *hex16(const unsigned char *d, unsigned long n, char *out)
+{
+    unsigned long i, m = n < 16 ? n : 16;
+    char *p = out;
+    for (i = 0; i < m; i++) p += sprintf(p, "%s%02X", i ? " " : "", d[i]);
+    if (n > m) strcpy(p, " ...");
+    else if (n == 0) strcpy(p, "(none)");
+    return out;
+}
 
 /* ---- LE helpers ------------------------------------------------------- */
 static void put_u16(unsigned char *p, unsigned v){ p[0]=(unsigned char)v; p[1]=(unsigned char)(v>>8); }
@@ -136,9 +214,9 @@ static HANDLE com_open(const char *name)
 }
 
 /* "auto": walk HKLM\SYSTEM\...\Enum\USB\<key starting VID_16D0&PID_1263>
- * (prefix match — the CDC child sits under ...&MI_00) for PortName values
+ * (prefix match: the CDC child sits under ...&MI_00) for PortName values
  * and return the first one that actually opens (Enum keys persist for
- * unplugged devices — a successful open is the presence test). The
+ * unplugged devices; a successful open is the presence test). The
  * SYSTEM hive is not WOW64-redirected, so this works from a 32-bit DLL. */
 static HANDLE com_autodiscover(char *found, int flen)
 {
@@ -244,7 +322,7 @@ static void ring_push(rx_ring_t *r, const PASSTHRU_MSG *m)
     EnterCriticalSection(&r->cs);
     int next = (r->head + 1) % RX_RING;
     if (next != r->tail) { r->msg[r->head] = *m; r->head = next; }
-    /* else drop-oldest by discarding the new one (ring full) */
+    /* else drop the new one (ring full) */
     LeaveCriticalSection(&r->cs);
 }
 
@@ -265,16 +343,16 @@ static DWORD WINAPI reader_thread(LPVOID arg)
 
     while (g_dev.reader_run) {
         if (!io_read_all(hdr, WW_HDR_SIZE)) break;
-        if (get_u16(hdr) != WW_MAGIC) break;
+        if (get_u16(hdr) != WW_MAGIC) { log_line("reader: bad frame magic, link dropped"); break; }
         unsigned type = hdr[3], seq = get_u16(hdr+4), ch = get_u16(hdr+6);
         unsigned long len = get_u32(hdr+8);
-        if (len > sizeof(payload)) break;
+        if (len > sizeof(payload)) { log_line("reader: frame too big (%lu), link dropped", len); break; }
         if (len && !io_read_all(payload, (int)len)) break;
 
         if (type == WW_ACK) {
             g_dev.ack_status = (len>=4) ? get_u32(payload) : ERR_FAILED;
             g_dev.ack_result = (len>=8) ? get_u32(payload+4) : 0;
-            if (seq == g_dev.await_seq) g_dev.ack_ready = 1;
+            if (seq == g_dev.await_seq) { g_dev.ack_ready = 1; SetEvent(g_dev.ack_ev); }
         } else if (type == WW_RX_MSG && ch >= 1 && ch <= J2534_MAX_CH) {
             PASSTHRU_MSG m; decode_msg(payload, (int)len, &m);
             ring_push(&g_dev.ring[ch-1], &m);
@@ -282,6 +360,8 @@ static DWORD WINAPI reader_thread(LPVOID arg)
         /* WW_EVENT: ignored for now */
     }
     g_dev.connected = 0;
+    SetEvent(g_dev.ack_ev);   /* a waiting transact() learns of the end */
+    log_line("reader: link closed");
     return 0;
 }
 
@@ -291,25 +371,43 @@ static long transact(unsigned char type, unsigned channel,
                      unsigned long *result)
 {
     unsigned char hdr[WW_HDR_SIZE];
+    long st;
     if (!g_dev.connected) { set_err("not connected"); return ERR_DEVICE_NOT_CONNECTED; }
 
+    EnterCriticalSection(&g_dev.req_cs);
     EnterCriticalSection(&g_dev.tx_cs);
     g_dev.seq = (g_dev.seq + 1) & 0xFFFF;
     unsigned myseq = g_dev.seq;
     put_u16(hdr+0, WW_MAGIC); hdr[2]=WW_VERSION; hdr[3]=type;
     put_u16(hdr+4, myseq); put_u16(hdr+6, channel); put_u32(hdr+8, len);
     g_dev.await_seq = myseq; g_dev.ack_ready = 0;
+    ResetEvent(g_dev.ack_ev);
     int ok = io_write_all(hdr, WW_HDR_SIZE) &&
              (!len || io_write_all(payload, len));
     LeaveCriticalSection(&g_dev.tx_cs);
 
-    if (!ok) { set_err("device write failed"); return ERR_DEVICE_NOT_CONNECTED; }
+    if (!ok) {
+        LeaveCriticalSection(&g_dev.req_cs);
+        set_err("device write failed"); return ERR_DEVICE_NOT_CONNECTED;
+    }
 
-    for (int i = 0; i < 600 && !g_dev.ack_ready && g_dev.connected; i++) Sleep(10);
-    if (!g_dev.ack_ready) { set_err("device ACK timeout"); return ERR_TIMEOUT; }
+    DWORD t0 = GetTickCount();
+    while (!g_dev.ack_ready && g_dev.connected) {
+        DWORD el = GetTickCount() - t0;
+        if (el >= ACK_WAIT_MS) break;
+        WaitForSingleObject(g_dev.ack_ev, ACK_WAIT_MS - el);
+    }
+
+    if (!g_dev.ack_ready) {
+        LeaveCriticalSection(&g_dev.req_cs);
+        if (!g_dev.connected) { set_err("device link lost"); return ERR_DEVICE_NOT_CONNECTED; }
+        set_err("device ACK timeout"); return ERR_TIMEOUT;
+    }
 
     if (result) *result = g_dev.ack_result;
-    return (long)g_dev.ack_status;
+    st = (long)g_dev.ack_status;
+    LeaveCriticalSection(&g_dev.req_cs);
+    return st;
 }
 
 /* ---- connection setup ------------------------------------------------- */
@@ -319,6 +417,7 @@ typedef struct {
     char com[16];     /* "COM7"; "" = auto-discover by USB VID/PID */
     char host[128];
     unsigned short port;
+    char log[260];    /* debug log file; "" = off */
 } target_t;
 
 /* "COM<digits>" (case-insensitive)? Lets Host / WICAN_J2534_HOST name a
@@ -349,8 +448,11 @@ static void resolve_target(target_t *t)
         if (_stricmp(tr, "serial") == 0) t->serial = 1;
         sz = sizeof(t->com);
         RegQueryValueExA(k, "ComPort", NULL, &type, (LPBYTE)t->com, &sz);
+        sz = sizeof(t->log);
+        RegQueryValueExA(k, "LogFile", NULL, &type, (LPBYTE)t->log, &sz);
         RegCloseKey(k);
     }
+    t->host[sizeof(t->host)-1] = 0; t->com[sizeof(t->com)-1] = 0; t->log[sizeof(t->log)-1] = 0;
     if (is_com_name(t->host)) {          /* Host="COM7" shorthand */
         t->serial = 1;
         strncpy(t->com, t->host, sizeof(t->com)-1);
@@ -369,6 +471,9 @@ static void resolve_target(target_t *t)
     if ((e = getenv("WICAN_J2534_COM"))) {  /* strongest: force serial */
         t->serial = 1;
         strncpy(t->com, e, sizeof(t->com)-1); t->com[sizeof(t->com)-1]=0;
+    }
+    if ((e = getenv("WICAN_J2534_LOG"))) {
+        strncpy(t->log, e, sizeof(t->log)-1); t->log[sizeof(t->log)-1]=0;
     }
     if (_stricmp(t->com, "auto") == 0) t->com[0] = 0;
 }
@@ -395,11 +500,13 @@ static void transport_teardown(void)
         WSACleanup();
     }
     g_dev.reader = NULL;
+    if (g_dev.ack_ev) { CloseHandle(g_dev.ack_ev); g_dev.ack_ev = NULL; }
 }
 
 static void locks_delete(void)
 {
     DeleteCriticalSection(&g_dev.tx_cs);
+    DeleteCriticalSection(&g_dev.req_cs);
     for (int i=0;i<J2534_MAX_CH;i++) DeleteCriticalSection(&g_dev.ring[i].cs);
 }
 
@@ -412,6 +519,7 @@ J2534_API PassThruOpen(const void *pName, unsigned long *pDeviceID)
 
     target_t tgt;
     resolve_target(&tgt);
+    log_open(tgt.log);
     memset(&g_dev, 0, sizeof(g_dev));
 
     if (tgt.serial) {
@@ -421,6 +529,7 @@ J2534_API PassThruOpen(const void *pName, unsigned long *pDeviceID)
             set_err(tgt.com[0]
                 ? "COM port open failed (in use, or wrong port?)"
                 : "no WiCAN COM port found (VID 16D0 PID 1263 - is the WiCAN plugged in and in device/cdc mode?)");
+            log_line("PassThruOpen: serial %s: %s", tgt.com[0] ? tgt.com : "auto", g_last_error);
             return ERR_DEVICE_NOT_CONNECTED;
         }
         g_dev.is_serial = 1; g_dev.hcom = h;
@@ -435,20 +544,29 @@ J2534_API PassThruOpen(const void *pName, unsigned long *pDeviceID)
         struct addrinfo hints, *res = NULL; char pstr[8];
         memset(&hints,0,sizeof(hints)); hints.ai_family=AF_INET; hints.ai_socktype=SOCK_STREAM;
         sprintf(pstr, "%u", tgt.port);
-        if (getaddrinfo(tgt.host, pstr, &hints, &res) != 0) { set_err("resolve failed"); WSACleanup(); return ERR_DEVICE_NOT_CONNECTED; }
+        if (getaddrinfo(tgt.host, pstr, &hints, &res) != 0) {
+            set_err("resolve failed"); WSACleanup();
+            log_line("PassThruOpen: tcp %s:%u: resolve failed", tgt.host, tgt.port);
+            return ERR_DEVICE_NOT_CONNECTED;
+        }
 
         SOCKET s = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
         if (s == INVALID_SOCKET || connect(s, res->ai_addr, (int)res->ai_addrlen) != 0) {
             freeaddrinfo(res); if (s!=INVALID_SOCKET) closesocket(s);
-            set_err("connect failed"); WSACleanup(); return ERR_DEVICE_NOT_CONNECTED;
+            set_err("connect failed"); WSACleanup();
+            log_line("PassThruOpen: tcp %s:%u: connect failed", tgt.host, tgt.port);
+            return ERR_DEVICE_NOT_CONNECTED;
         }
         freeaddrinfo(res);
         int one = 1; setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char*)&one, sizeof(one));
         g_dev.sock = s;
     }
 
+    g_dev.ack_ev = CreateEventA(NULL, FALSE, FALSE, NULL);   /* auto-reset */
+    if (!g_dev.ack_ev) { transport_teardown(); set_err("CreateEvent failed"); return ERR_FAILED; }
     g_dev.connected = 1;
     InitializeCriticalSection(&g_dev.tx_cs);
+    InitializeCriticalSection(&g_dev.req_cs);
     for (int i=0;i<J2534_MAX_CH;i++) InitializeCriticalSection(&g_dev.ring[i].cs);
     g_dev.reader_run = 1;
     g_dev.reader = CreateThread(NULL, 0, reader_thread, NULL, 0, NULL);
@@ -457,17 +575,24 @@ J2534_API PassThruOpen(const void *pName, unsigned long *pDeviceID)
     unsigned char p[4]; put_u32(p, WW_VERSION);
     if (transact(WW_HELLO, 0, p, 4, &result) != STATUS_NOERROR) {
         transport_teardown(); locks_delete();
-        set_err("HELLO failed"); return ERR_FAILED;
+        set_err("HELLO failed");
+        log_line("PassThruOpen: HELLO failed (%s)", g_last_error);
+        return ERR_FAILED;
     }
     unsigned long dev = 0;
     if (transact(WW_OPEN, 0, NULL, 0, &dev) != STATUS_NOERROR) {
         transport_teardown(); locks_delete();
-        set_err("OPEN failed"); return ERR_FAILED;
+        set_err("OPEN failed");
+        log_line("PassThruOpen: OPEN failed");
+        return ERR_FAILED;
     }
 
     g_open = 1;
     if (pDeviceID) *pDeviceID = dev ? dev : 1;
     set_err("no error");
+    log_line("PassThruOpen: %s %s%s: ok, wire v%lu, device %lu (" DLL_VERSION ")",
+             tgt.serial ? "serial" : "tcp", tgt.serial ? tgt.com : tgt.host,
+             tgt.serial ? "" : "", result, dev ? dev : 1);
     return STATUS_NOERROR;
 }
 
@@ -479,6 +604,8 @@ J2534_API PassThruClose(unsigned long DeviceID)
     transport_teardown();
     locks_delete();
     g_open = 0;
+    log_line("PassThruClose: ok");
+    log_close();
     return STATUS_NOERROR;
 }
 
@@ -488,16 +615,27 @@ J2534_API PassThruConnect(unsigned long DeviceID, unsigned long ProtocolID,
 {
     (void)DeviceID;
     if (!g_open) return ERR_INVALID_DEVICE_ID;
-    if (ProtocolID != CAN && ProtocolID != ISO15765) return ERR_INVALID_PROTOCOL_ID;
+    /* CAN + ISO15765 on the native controller; J1850 VPW (GM Class 2) on
+     * the device's OBD chip. For J1850 the app puts the whole message
+     * ([3-byte header][payload]) in PASSTHRU_MSG.Data with no CAN-id
+     * prefix, and the DLL passes it through verbatim like every message. */
+    if (ProtocolID != CAN && ProtocolID != ISO15765 &&
+        ProtocolID != J1850VPW) {
+        log_line("PassThruConnect: protocol %lu: ERR_INVALID_PROTOCOL_ID", ProtocolID);
+        return ERR_INVALID_PROTOCOL_ID;
+    }
 
     unsigned char p[20];
     put_u32(p+0, ProtocolID); put_u32(p+4, Flags); put_u32(p+8, BaudRate);
     put_u32(p+12, 0); put_u32(p+16, 0);           /* tx/rx via FLOW_CONTROL filter */
     unsigned long chid = 0;
     long st = transact(WW_CONNECT, 0, p, sizeof(p), &chid);
+    log_line("PassThruConnect: protocol %lu flags 0x%lX baud %lu: status 0x%lX channel %lu",
+             ProtocolID, Flags, BaudRate, (unsigned long)st, chid);
     if (st != STATUS_NOERROR) return st;
     if (chid < 1 || chid > J2534_MAX_CH) return ERR_FAILED;
     g_dev.ch_proto[chid-1] = ProtocolID; g_dev.ch_open[chid-1] = 1;
+    g_dev.ch_baud[chid-1] = BaudRate;
     if (pChannelID) *pChannelID = chid;
     return STATUS_NOERROR;
 }
@@ -507,6 +645,7 @@ J2534_API PassThruDisconnect(unsigned long ChannelID)
     if (!g_open || ChannelID<1 || ChannelID>J2534_MAX_CH) return ERR_INVALID_CHANNEL_ID;
     long st = transact(WW_DISCONNECT, (unsigned)ChannelID, NULL, 0, NULL);
     g_dev.ch_open[ChannelID-1] = 0;
+    log_line("PassThruDisconnect: channel %lu: status 0x%lX", ChannelID, (unsigned long)st);
     return st;
 }
 
@@ -520,11 +659,23 @@ J2534_API PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
     DWORD deadline = GetTickCount() + Timeout;
     while (got < want) {
         if (ring_pop(r, &pMsg[got])) { got++; continue; }
-        if (Timeout == 0 || GetTickCount() >= deadline) break;
-        Sleep(2);
+        if (Timeout == 0 || (long)(GetTickCount() - deadline) >= 0) break;
+        Sleep(1);
     }
     *pNumMsgs = got;
-    return got ? STATUS_NOERROR : ERR_BUFFER_EMPTY;
+    if (got) {
+        char hx[80];
+        for (unsigned long i = 0; i < got; i++)
+            log_line("PassThruReadMsgs: channel %lu rx_status 0x%lX size %lu [%s]",
+                     ChannelID, pMsg[i].RxStatus, pMsg[i].DataSize,
+                     hex16(pMsg[i].Data, pMsg[i].DataSize, hx));
+        return STATUS_NOERROR;
+    }
+    /* Nothing read: ERR_BUFFER_EMPTY whatever the Timeout, as 1.1 and the
+     * common devices answer. SAE J2534-1 names ERR_TIMEOUT for an expired
+     * non-zero Timeout, but udsoncan 1.26's reader (1 ms polls) takes
+     * ERR_TIMEOUT as data and queues empty payloads (bench-hit 2026-10-19). */
+    return ERR_BUFFER_EMPTY;
 }
 
 J2534_API PassThruWriteMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
@@ -535,10 +686,15 @@ J2534_API PassThruWriteMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
     if (!pMsg || !pNumMsgs) return ERR_NULL_PARAMETER;
     static unsigned char buf[4 + 24 + WW_MAX_DATA];
     unsigned long sent = 0;
+    char hx[80];
     for (unsigned long i = 0; i < *pNumMsgs; i++) {
+        if (pMsg[i].DataSize > WW_MAX_DATA) { *pNumMsgs = sent; set_err("message too long"); return ERR_INVALID_MSG; }
         put_u32(buf, 1);
         int n = 4 + encode_msg(&pMsg[i], buf + 4);
         long st = transact(WW_WRITE_MSGS, (unsigned)ChannelID, buf, (unsigned)n, NULL);
+        log_line("PassThruWriteMsgs: channel %lu protocol %lu tx_flags 0x%lX size %lu [%s]: status 0x%lX",
+                 ChannelID, pMsg[i].ProtocolID, pMsg[i].TxFlags, pMsg[i].DataSize,
+                 hex16(pMsg[i].Data, pMsg[i].DataSize, hx), (unsigned long)st);
         if (st != STATUS_NOERROR) { *pNumMsgs = sent; return st; }
         sent++;
     }
@@ -556,14 +712,26 @@ J2534_API PassThruStartMsgFilter(unsigned long ChannelID,
     if (!g_open || ChannelID<1 || ChannelID>J2534_MAX_CH) return ERR_INVALID_CHANNEL_ID;
     static unsigned char buf[4 + 3*(24+16)];
     unsigned char *p = buf;
+    char h1[80], h2[80], h3[80];
     put_u32(p, FilterType); p += 4;
     PASSTHRU_MSG empty; memset(&empty, 0, sizeof(empty));
-    p += encode_msg(pMaskMsg ? pMaskMsg : &empty, p);
-    p += encode_msg(pPatternMsg ? pPatternMsg : &empty, p);
+    const PASSTHRU_MSG *mk = pMaskMsg ? pMaskMsg : &empty;
+    const PASSTHRU_MSG *pt = pPatternMsg ? pPatternMsg : &empty;
+    if (mk->DataSize > 16 || pt->DataSize > 16 ||
+        (pFlowControlMsg && pFlowControlMsg->DataSize > 16)) {
+        set_err("filter message too long"); return ERR_INVALID_MSG;
+    }
+    p += encode_msg(mk, p);
+    p += encode_msg(pt, p);
     if (pFlowControlMsg) p += encode_msg(pFlowControlMsg, p);
     unsigned long fid = 0;
     long st = transact(WW_START_FILTER, (unsigned)ChannelID, buf,
                        (unsigned)(p - buf), &fid);
+    log_line("PassThruStartMsgFilter: channel %lu type %lu mask [%s] pattern [%s] flow [%s] tx_flags 0x%lX: status 0x%lX filter %lu",
+             ChannelID, FilterType, hex16(mk->Data, mk->DataSize, h1),
+             hex16(pt->Data, pt->DataSize, h2),
+             pFlowControlMsg ? hex16(pFlowControlMsg->Data, pFlowControlMsg->DataSize, h3) : "-",
+             pFlowControlMsg ? pFlowControlMsg->TxFlags : pt->TxFlags, (unsigned long)st, fid);
     if (st == STATUS_NOERROR && pFilterID) *pFilterID = fid;
     return st;
 }
@@ -572,7 +740,9 @@ J2534_API PassThruStopMsgFilter(unsigned long ChannelID, unsigned long FilterID)
 {
     if (!g_open || ChannelID<1 || ChannelID>J2534_MAX_CH) return ERR_INVALID_CHANNEL_ID;
     unsigned char p[4]; put_u32(p, FilterID);
-    return transact(WW_STOP_FILTER, (unsigned)ChannelID, p, 4, NULL);
+    long st = transact(WW_STOP_FILTER, (unsigned)ChannelID, p, 4, NULL);
+    log_line("PassThruStopMsgFilter: channel %lu filter %lu: status 0x%lX", ChannelID, FilterID, (unsigned long)st);
+    return st;
 }
 
 J2534_API PassThruStartPeriodicMsg(unsigned long ChannelID,
@@ -582,11 +752,16 @@ J2534_API PassThruStartPeriodicMsg(unsigned long ChannelID,
 {
     if (!g_open || ChannelID<1 || ChannelID>J2534_MAX_CH) return ERR_INVALID_CHANNEL_ID;
     if (!pMsg) return ERR_NULL_PARAMETER;
+    if (pMsg->DataSize > WW_MAX_DATA) { set_err("message too long"); return ERR_INVALID_MSG; }
     static unsigned char buf[4 + 24 + WW_MAX_DATA];
+    char hx[80];
     put_u32(buf, TimeInterval);
     int n = 4 + encode_msg(pMsg, buf + 4);
     unsigned long id = 0;
     long st = transact(WW_START_PERIODIC, (unsigned)ChannelID, buf, (unsigned)n, &id);
+    log_line("PassThruStartPeriodicMsg: channel %lu every %lu ms size %lu [%s]: status 0x%lX id %lu",
+             ChannelID, TimeInterval, pMsg->DataSize, hex16(pMsg->Data, pMsg->DataSize, hx),
+             (unsigned long)st, id);
     if (st == STATUS_NOERROR && pMsgID) *pMsgID = id;
     return st;
 }
@@ -595,17 +770,53 @@ J2534_API PassThruStopPeriodicMsg(unsigned long ChannelID, unsigned long MsgID)
 {
     if (!g_open || ChannelID<1 || ChannelID>J2534_MAX_CH) return ERR_INVALID_CHANNEL_ID;
     unsigned char p[4]; put_u32(p, MsgID);
-    return transact(WW_STOP_PERIODIC, (unsigned)ChannelID, p, 4, NULL);
+    long st = transact(WW_STOP_PERIODIC, (unsigned)ChannelID, p, 4, NULL);
+    log_line("PassThruStopPeriodicMsg: channel %lu id %lu: status 0x%lX", ChannelID, MsgID, (unsigned long)st);
+    return st;
+}
+
+/* GET_CONFIG: the values this device runs with (its ISO-TP flow control
+ * is BS 8 / STmin 1 ms, bus timing comes from the device settings) */
+static unsigned long config_value(unsigned long channel, unsigned long param)
+{
+    switch (param) {
+        case DATA_RATE:      return (channel >= 1 && channel <= J2534_MAX_CH) ? g_dev.ch_baud[channel-1] : 0;
+        case LOOPBACK:       return 0;
+        case ISO15765_BS:    return 8;
+        case ISO15765_STMIN: return 1;
+        default:             return 0;
+    }
 }
 
 J2534_API PassThruIoctl(unsigned long ChannelID, unsigned long IoctlID,
                         const void *pInput, void *pOutput)
 {
     if (!g_open) return ERR_INVALID_DEVICE_ID;
-    if (IoctlID == READ_VBATT) { if (pOutput) *(unsigned long*)pOutput = 12000; return STATUS_NOERROR; }
-    (void)pInput;
+    if (IoctlID == READ_VBATT) {
+        if (pOutput) *(unsigned long*)pOutput = 12000;
+        log_line("PassThruIoctl: READ_VBATT: 12000 mV (nominal)");
+        return STATUS_NOERROR;
+    }
+    if (IoctlID == GET_CONFIG) {
+        const SCONFIG_LIST *l = (const SCONFIG_LIST*)pInput;
+        if (!l || (l->NumOfParams && !l->ConfigPtr)) return ERR_NULL_PARAMETER;
+        for (unsigned long i = 0; i < l->NumOfParams; i++) {
+            l->ConfigPtr[i].Value = config_value(ChannelID, l->ConfigPtr[i].Parameter);
+            log_line("PassThruIoctl: GET_CONFIG channel %lu param 0x%lX = %lu",
+                     ChannelID, l->ConfigPtr[i].Parameter, l->ConfigPtr[i].Value);
+        }
+        return STATUS_NOERROR;
+    }
+    if (IoctlID == SET_CONFIG && pInput) {
+        const SCONFIG_LIST *l = (const SCONFIG_LIST*)pInput;
+        for (unsigned long i = 0; l->ConfigPtr && i < l->NumOfParams; i++)
+            log_line("PassThruIoctl: SET_CONFIG channel %lu param 0x%lX = %lu (device keeps its own bus timing)",
+                     ChannelID, l->ConfigPtr[i].Parameter, l->ConfigPtr[i].Value);
+    }
     unsigned char p[4]; put_u32(p, IoctlID);
-    return transact(WW_IOCTL, (unsigned)ChannelID, p, 4, NULL);
+    long st = transact(WW_IOCTL, (unsigned)ChannelID, p, 4, NULL);
+    log_line("PassThruIoctl: channel %lu ioctl 0x%lX: status 0x%lX", ChannelID, IoctlID, (unsigned long)st);
+    return st;
 }
 
 J2534_API PassThruSetProgrammingVoltage(unsigned long DeviceID,
@@ -630,4 +841,8 @@ J2534_API PassThruGetLastError(char *pErrorDescription)
 }
 
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r)
-{ (void)h;(void)r; if (reason==DLL_PROCESS_DETACH && g_open) PassThruClose(0); return TRUE; }
+{
+    (void)h;(void)r;
+    if (reason==DLL_PROCESS_DETACH) { if (g_open) PassThruClose(0); log_close(); }
+    return TRUE;
+}

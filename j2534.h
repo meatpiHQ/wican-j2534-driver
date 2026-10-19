@@ -12,6 +12,7 @@ extern "C" {
 #endif
 
 /* protocol IDs */
+#define J1850VPW       1
 #define CAN            5
 #define ISO15765       6
 
