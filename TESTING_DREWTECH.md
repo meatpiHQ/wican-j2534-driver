@@ -68,12 +68,12 @@ Windows Registry Editor Version 5.00
    Windows binds the inbox `UsbNcm.sys` and WiCAN serves DHCP; the PC gets
    `192.168.82.2`, WiCAN is `192.168.82.1`. Confirm with
    `ping 192.168.82.1`.
-2. Enable the J2534 server and (for a reflash test) open the flashing gate:
-   `PUT /api/settings/j2534_server {"enabled":true,"allow_reflash":true}`
-   then `POST /api/settings/submit` (reboots). Leave `allow_reflash` at its
-   default `false` for read-only diagnostics — see the safety note below.
-   The USB-device link counts as an allowed interface, so `allow_lan` can
-   stay `false`.
+2. Enable the J2534 server: `PUT /api/settings/j2534_server
+   {"enabled":true}` then `POST /api/settings/submit` (reboots). Firmware
+   of 2026-10-27 or later forwards every write, a reflash included (the
+   old `allow_reflash` gate is gone; older firmware needs
+   `"allow_reflash":true` for the reflash legs). The USB-device link counts
+   as an allowed interface, so `allow_lan` can stay `false`.
 3. Put an ECU (or the `pcan_reflash_ecu.py` simulator) on WiCAN's CAN bus
    so there's something to answer. For the sim:
    `python -u tools/testbench/pcan_reflash_ecu.py 1200 --scenario happy`
@@ -123,8 +123,9 @@ the id, timed out against it: the field report of 2026-10-19.)
 
 ## 4. Watch WiCAN's side
 
-- `GET /api/j2534` — `client_connected`, `channels`, `frames_rx/tx`,
-  and the safety flags `allow_reflash` / `allow_lan`.
+- `GET /api/j2534`: `client_connected`, `channels`, `frames_rx/tx`,
+  `reflash_seen` (reprogramming services forwarded since boot) and the
+  `allow_lan` flag.
 - `GET /api/logs/ring` — the ISO-TP bind line and per-frame
   `send start` / `tx frame` traces.
 - `GET /api/can` — `tx`, `rx`, and error counters (`tx_errors`,
@@ -157,13 +158,14 @@ the id, timed out against it: the field report of 2026-10-19.)
 
 ## 6. Safety defaults (see the server settings)
 
-The J2534 server ships **disabled**. When you enable it, two gates stay
-closed by default:
+The J2534 server ships **disabled**. Enabling it is the consent: from the
+firmware of 2026-10-27 the device forwards every write, reads and
+reprogramming alike, and counts the reprogramming services it saw
+(`reflash_seen`). The old `allow_reflash` content gate refused ordinary
+raw CAN frames of a VW TP 2.0 flasher by reading them as ISO-TP (field
+report 2026-10-27) and blocked ISO15765 memory reads while missing every
+other write service, so it went. One gate stays closed by default:
 
-- **`allow_reflash` (default false)** — the device rejects UDS
-  memory-transfer services (RequestDownload/Upload, TransferData,
-  TransferExit). A tool can read and diagnose, but cannot write ECU
-  firmware. Open it only for a real reflash job.
 - **`allow_lan` (default false)** - connections are accepted only on
   WiCAN's SoftAP and USB-device link (someone physically at the device).
   Connections arriving over WiFi-STA or a USB-Ethernet uplink (a shared
@@ -194,4 +196,4 @@ DrewTech tool:
 The firmware bench `tools/testbench/usb/j2534_vpw_bench.py` drives the same
 sequence over the wire protocol and prints `J2534 VPW PASS` / `SKIP` /
 `FAIL`. Programming a GM module runs at 10.4 kbit/s (4x speed is not
-implemented) with `allow_reflash` on.
+implemented); no switch is needed since the 2026-10-27 firmware.

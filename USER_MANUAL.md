@@ -199,7 +199,7 @@ Any J2534 tool works the same way. Below is the flow using the free
    see:
    - Supported Protocols: `CAN, ISO15765`
    - Device Firmware Version: `WiCAN v6`
-   - J2534 DLL Version: `WiCAN J2534 1.2`
+   - J2534 DLL Version: `WiCAN J2534 1.5`
    - SAE J2534 API Version: `04.04`
 3. **Connect.** Protocol **ISO15765**, Baud **500000**, Connect. →
    `PassThruConnect`.
@@ -231,21 +231,21 @@ and the reflash services (which need the gate in §7).
 
 ---
 
-## 7. Safety gates (read this before reflashing)
+## 7. What enabling the server means (read this before reflashing)
 
-J2534 can reprogram ECUs, so WiCAN guards it with two settings (both
-default **false**):
+J2534 can reprogram ECUs. The WiCAN does not inspect what a tool sends:
+once the server is enabled it forwards every write, reads and
+reprogramming alike, like a cable, and counts the reprogramming services
+it saw on the J2534 page (`reflash_seen` on `GET /api/j2534`). Enabling the
+server is the consent; leave it off when no tool should drive the bus.
 
-- **`allow_reflash`** — when **false**, the device **rejects the UDS
-  reprogramming services** (RequestDownload `0x34`, Upload `0x35`,
-  TransferData `0x36`, TransferExit `0x37`). A connected tool can read
-  and diagnose but **cannot write ECU firmware**. Flip it **true** only
-  for a real, intended reflash job:
-  ```
-  PUT /api/settings/j2534_server {"enabled":true,"allow_reflash":true}
-  POST /api/settings/submit
-  ```
-  Set it back to `false` when done.
+Firmware before 2026-10-27 had an extra **`allow_reflash`** switch that
+refused the UDS reprogramming services (`0x34..0x37`) and, on raw CAN,
+ordinary frames of tools with their own framing (VW TP 2.0): on such
+firmware turn "Allow ECU flashing" on for flashing work, or update.
+
+One exposure gate remains (default **false**):
+
 - **`allow_lan`** — when **false**, the server accepts tester connections
   **only** on the WiCAN SoftAP and the USB-device link (someone
   physically on the AP or plugged into the cable). A connection arriving
@@ -264,7 +264,8 @@ With the recommended **USB-device (NCM)** transport, `allow_lan` can stay
 - **Device CLI:** the `j2534` command prints enabled/listening, whether a
   tester is connected, channel count, and rx/tx frame counters.
 - **`GET /api/j2534`** — `client_connected`, `channels`, `frames_rx/tx`,
-  and the `allow_reflash` / `allow_lan` flags.
+  `reflash_seen` (reprogramming services forwarded since boot) and the
+  `allow_lan` flag.
 - **`GET /api/can`** — `tx`, `rx`, `tx_errors`, `bus_errors`: use these
   to tell a WiCAN problem from a bus/ECU one (e.g. no ACK = wrong bitrate
   or nothing on the bus).
@@ -300,11 +301,40 @@ CAN bus (e.g. `pcan_reflash_ecu.py`, request `0x7E0` / response `0x7E8`).
 | Connection over the shop LAN is refused | `allow_lan` is `false` (the safe default) — WiFi-STA / USB-Ethernet connections are dropped. Use AP/USB-device, or set `allow_lan=true` if you accept the exposure. |
 | Serial mode: "no WiCAN COM port found" | The WiCAN isn't enumerated as a COM port. Check `role=device` + `device_class=cdc` is set and the device rebooted; look for "USB Serial Device (COMn)" in Device Manager (VID 16D0 PID 1263). |
 | Serial mode: COM port open failed | Another program has the port open (only one app at a time), or `ComPort` names the wrong port — set it to `auto`. |
-| Reflash services rejected (`0x34/36/37` fail) | `allow_reflash` is `false` (default). Enable it only for an intended reflash (§7). |
+| Reflash services rejected (`0x34/36/37` fail), or `PassThruWriteMsgs` answers `NotSupported (0x01)` now and then on a **raw CAN** channel with `GetLastError` "no error" | Firmware before 2026-10-27 had an ECU-flashing gate (`allow_reflash`, default off) that refused those services and, on raw CAN, read every frame as ISO-TP and refused ordinary frames of tools with their own framing (VW TP 2.0) whose byte at the service position was `0x34..0x37`. Update the firmware (the gate is gone, every write is forwarded) and the driver (1.5 explains every refusal in `GetLastError`); on old firmware turn "Allow ECU flashing" on for that work. |
 | Data looks wrong / cross-talk on the bus | An `autopid` group polling the same bus can interleave with the tester. Disable autopid while running J2534. |
 | Flow-Control column greyed out | You're on a **CAN** channel; flow control is ISO15765-only. Connect an ISO15765 channel for ISO-TP. |
 | Every ISO15765 request times out although the car answers other tools | The WiCAN firmware predates 2026-10-20: it expected the bare UDS payload instead of the J2534-1 layout (the 4-byte CAN id first). Update the firmware; the driver is unchanged. |
-| You need to see what the tool really sends | Set `WICAN_J2534_LOG=C:\path\wican_j2534.log` (or the registry `LogFile`) before starting the tool, reproduce, and read or send the log: every call, its bytes and the device's answer are in it (§11). |
+| You need to see what the tool really sends | Open the driver log (Start Menu: "WiCAN J2534 driver log", or `C:\Users\Public\Documents\WiCAN\wican_j2534.log`): every call, every byte sent to the ECU and received from it, and the device's answer are in it (§10a). |
+
+## 10a. Driver log
+
+The driver keeps a log of everything that passes through it, on by default
+since 1.4, so a problem can be shown instead of described:
+
+- **Where:** `C:\Users\Public\Documents\WiCAN\wican_j2534.log` (the Start
+  Menu entry "WiCAN J2534 driver log" opens the folder). Any user's tool can
+  write there, no administrator rights needed. At 16 MB the file is renamed
+  to `wican_j2534.log.1` and a fresh one starts, so the folder holds the
+  last 16 to 32 MB: about an hour of a busy flash.
+- **What:** one line per API call with the local time (ms) and the calling
+  thread: `PassThruOpen` (transport, firmware and driver versions, the log
+  path), `PassThruConnect` (protocol, flags, baud, status), every
+  `PassThruWriteMsgs` message in full (`[00 00 07 40 B1]`: the 4-byte CAN id
+  first, then the frame bytes, then the device's status), every message
+  `PassThruReadMsgs` returned in full with its `rx_status` and the device's
+  microsecond timestamp `ts`, every filter, periodic message and IOCTL with
+  its status, and `reader: link closed` when the link dropped. The same
+  lines go to `OutputDebugString` for DebugView.
+- **Sending it:** reproduce the problem, then send the `.log` (and the `.1`
+  if the problem happened earlier) with the WiCAN's firmware version. A
+  refused write shows as `status 0x1` (NotSupported), `0x7` (failed) or
+  `0x9` (timeout) on its own line, with the bytes that were refused.
+- **Moving or silencing it:** set the environment variable
+  `WICAN_J2534_LOG` to another file path before starting the tool, or the
+  registry value `LogFile` under `HKLM\SOFTWARE\WiCAN\J2534` (and
+  `WOW6432Node\WiCAN\J2534` for 32-bit tools); the value `off` disables the
+  file (DebugView still gets the lines).
 
 ---
 
@@ -313,12 +343,15 @@ CAN bus (e.g. `pcan_reflash_ecu.py`, request `0x7E0` / response `0x7E8`).
 - **Ports/IPs:** TCP **6809**; USB-device `192.168.82.1`, AP
   `192.168.80.1`. USB-serial: COM port, VID `16D0` PID `1263`.
 - **Version strings** (`PassThruReadVersion`): firmware `WiCAN v6`, DLL
-  `WiCAN J2534 1.2`, API `04.04`.
-- **Debug log:** set the environment variable `WICAN_J2534_LOG` to a file
-  path (or the registry value `LogFile` under `HKLM\SOFTWARE\WiCAN\J2534`,
-  `WOW6432Node` for 32-bit tools) and the DLL appends one line per call:
-  the bytes written, every message read with its RxStatus, every status.
-  The same lines go to `OutputDebugString` (DebugView) always.
+  `WiCAN J2534 1.5`, API `04.04`.
+- **Driver log:** on by default (1.4) at
+  `C:\Users\Public\Documents\WiCAN\wican_j2534.log` (Start Menu: "WiCAN
+  J2534 driver log"), one line per call with every message's bytes in full
+  both ways; see "Driver log" below. The environment variable
+  `WICAN_J2534_LOG` or the registry value `LogFile` under
+  `HKLM\SOFTWARE\WiCAN\J2534` (`WOW6432Node` for 32-bit tools) move it,
+  `off` disables it. The same lines go to `OutputDebugString` (DebugView)
+  always.
 - **Protocols:** CAN, ISO15765. **Baud:** 500000 typical (match the
   bus).
 - **Exports:** the 14 `PassThru*` functions (see `wican_j2534.def`).

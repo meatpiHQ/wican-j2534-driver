@@ -17,9 +17,11 @@
  *       LogFile (REG_SZ, optional)
  *   - default 192.168.80.1 : 6809  (WiCAN SoftAP gateway)
  *
- * Debug log: env WICAN_J2534_LOG=<file> (or the registry LogFile) appends
- * one line per API call with its bytes and status; every line also goes to
- * OutputDebugString (DebugView). Off when neither is set.
+ * Driver log (on by default since 1.4): one line per API call, every
+ * message's bytes in full both ways, at %PUBLIC%\Documents\WiCAN\
+ * wican_j2534.log (16 MB, one rotation); env WICAN_J2534_LOG=<file> or the
+ * registry LogFile move it, "off" disables it; every line also goes to
+ * OutputDebugString (DebugView).
  *
  * RX model: WiCAN pushes RX_MSG frames; one reader thread owns the
  * transport read side and dispatches: ACK frames wake the pending
@@ -63,7 +65,7 @@
 
 #define J2534_MAX_CH  8
 #define RX_RING       256
-#define DLL_VERSION   "WiCAN J2534 1.3"
+#define DLL_VERSION   "WiCAN J2534 1.5"
 /* longer than the device's longest WRITE (a multi-frame send at a slow
  * STmin is capped at 5.5 s on the device side) */
 #define ACK_WAIT_MS   8000
@@ -78,6 +80,7 @@ typedef struct {
     PASSTHRU_MSG msg[RX_RING];
     volatile int head, tail;
     CRITICAL_SECTION cs;
+    HANDLE ev;                /* auto-reset: a message was pushed (1.4) */
 } rx_ring_t;
 
 typedef struct {
@@ -113,17 +116,49 @@ static char g_last_error[256] = "no error";
 static void set_err(const char *m)
 { strncpy(g_last_error, m, sizeof(g_last_error) - 1); g_last_error[sizeof(g_last_error)-1] = 0; }
 
-/* ---- debug log --------------------------------------------------------- */
+/* ---- the driver log ---------------------------------------------------- */
+/*
+ * On by default since 1.4 (2026-10-27): a user can always send it. One line
+ * per API call, every message's bytes in full both ways (what went to the
+ * ECU, what came back, with the device's microsecond timestamp on reads),
+ * at a fixed place every user can write without admin rights:
+ *   C:\Users\Public\Documents\WiCAN\wican_j2534.log   (%PUBLIC%\Documents)
+ * Capped at LOG_MAX_BYTES, then rotated once to wican_j2534.log.1.
+ * The registry `LogFile` or the env WICAN_J2534_LOG move it ("off" disables
+ * it). Every line also goes to OutputDebugString (DebugView).
+ */
+#define LOG_MAX_BYTES (16ul * 1024ul * 1024ul)
+#define LOG_LINE_CAP  (3 * WW_MAX_DATA + 256)   /* a full 4128-byte message as hex */
 
 static FILE *g_log;                 /* NULL = file logging off */
 static CRITICAL_SECTION g_log_cs;
 static int g_log_cs_ready;
+static char g_log_path[MAX_PATH];
+static unsigned long g_log_bytes;
+static char g_log_line[LOG_LINE_CAP];   /* under g_log_cs */
+
+static void log_default_path(char *out, size_t n)
+{
+    const char *pub = getenv("PUBLIC");   /* C:\Users\Public on every Windows since Vista */
+    char dir[MAX_PATH];
+    _snprintf(dir, sizeof(dir), "%s\\Documents\\WiCAN", (pub && pub[0]) ? pub : "C:\\Users\\Public");
+    dir[sizeof(dir) - 1] = 0;
+    CreateDirectoryA(dir, NULL);          /* exists already: fine */
+    _snprintf(out, n, "%s\\wican_j2534.log", dir);
+    out[n - 1] = 0;
+}
 
 static void log_open(const char *path)
 {
     if (!g_log_cs_ready) { InitializeCriticalSection(&g_log_cs); g_log_cs_ready = 1; }
-    if (g_log || !path || !path[0]) return;
-    g_log = fopen(path, "a");
+    if (g_log) return;
+    if (path && path[0] && _stricmp(path, "off") == 0) { g_log_path[0] = 0; return; }
+    if (path && path[0]) { strncpy(g_log_path, path, sizeof(g_log_path) - 1); g_log_path[sizeof(g_log_path) - 1] = 0; }
+    else log_default_path(g_log_path, sizeof(g_log_path));
+    g_log = fopen(g_log_path, "a");
+    if (!g_log) return;
+    fseek(g_log, 0, SEEK_END);
+    g_log_bytes = (unsigned long)ftell(g_log);
 }
 
 static void log_close(void)
@@ -131,33 +166,48 @@ static void log_close(void)
     if (g_log) { fclose(g_log); g_log = NULL; }
 }
 
+/* under g_log_cs: the file passed the cap, keep one older copy */
+static void log_rotate(void)
+{
+    char old[MAX_PATH + 4];
+    fclose(g_log); g_log = NULL;
+    _snprintf(old, sizeof(old), "%s.1", g_log_path); old[sizeof(old) - 1] = 0;
+    DeleteFileA(old);
+    MoveFileA(g_log_path, old);
+    g_log = fopen(g_log_path, "w");
+    g_log_bytes = 0;
+}
+
 static void log_line(const char *fmt, ...)
 {
-    char line[600];
     SYSTEMTIME st;
     va_list ap;
     int n;
 
+    if (!g_log_cs_ready) { InitializeCriticalSection(&g_log_cs); g_log_cs_ready = 1; }
+    EnterCriticalSection(&g_log_cs);
     GetLocalTime(&st);
-    n = _snprintf(line, sizeof(line), "%02d:%02d:%02d.%03d [%lu] ",
+    n = _snprintf(g_log_line, sizeof(g_log_line), "%02d:%02d:%02d.%03d [%lu] ",
                   st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
                   (unsigned long)GetCurrentThreadId());
-    if (n < 0 || n >= (int)sizeof(line)) n = 0;
+    if (n < 0 || n >= (int)sizeof(g_log_line)) n = 0;
     va_start(ap, fmt);
-    _vsnprintf(line + n, sizeof(line) - n - 2, fmt, ap);
+    _vsnprintf(g_log_line + n, sizeof(g_log_line) - n - 2, fmt, ap);
     va_end(ap);
-    line[sizeof(line) - 2] = 0;
-    strcat(line, "\n");
-    OutputDebugStringA(line);
-    if (g_log && g_log_cs_ready) {
-        EnterCriticalSection(&g_log_cs);
-        fputs(line, g_log);
+    g_log_line[sizeof(g_log_line) - 2] = 0;
+    strcat(g_log_line, "\n");
+    OutputDebugStringA(g_log_line);
+    if (g_log) {
+        fputs(g_log_line, g_log);
         fflush(g_log);
-        LeaveCriticalSection(&g_log_cs);
+        g_log_bytes += (unsigned long)strlen(g_log_line);
+        if (g_log_bytes > LOG_MAX_BYTES) log_rotate();
     }
+    LeaveCriticalSection(&g_log_cs);
 }
 
-/* the first 16 bytes of a message as hex, "..." when there are more */
+/* the first 16 bytes of a message as hex, "..." when there are more
+ * (filter masks and patterns) */
 static const char *hex16(const unsigned char *d, unsigned long n, char *out)
 {
     unsigned long i, m = n < 16 ? n : 16;
@@ -165,6 +215,16 @@ static const char *hex16(const unsigned char *d, unsigned long n, char *out)
     for (i = 0; i < m; i++) p += sprintf(p, "%s%02X", i ? " " : "", d[i]);
     if (n > m) strcpy(p, " ...");
     else if (n == 0) strcpy(p, "(none)");
+    return out;
+}
+
+/* every byte of a message as hex (out holds 3 * WW_MAX_DATA + 8) */
+static const char *hex_all(const unsigned char *d, unsigned long n, char *out)
+{
+    unsigned long i, m = n < WW_MAX_DATA ? n : WW_MAX_DATA;
+    char *p = out;
+    for (i = 0; i < m; i++) p += sprintf(p, "%s%02X", i ? " " : "", d[i]);
+    if (n == 0) strcpy(p, "(none)");
     return out;
 }
 
@@ -324,6 +384,7 @@ static void ring_push(rx_ring_t *r, const PASSTHRU_MSG *m)
     if (next != r->tail) { r->msg[r->head] = *m; r->head = next; }
     /* else drop the new one (ring full) */
     LeaveCriticalSection(&r->cs);
+    if (r->ev) SetEvent(r->ev);   /* wake a PassThruReadMsgs waiting on it */
 }
 
 static int ring_pop(rx_ring_t *r, PASSTHRU_MSG *out)
@@ -361,8 +422,36 @@ static DWORD WINAPI reader_thread(LPVOID arg)
     }
     g_dev.connected = 0;
     SetEvent(g_dev.ack_ev);   /* a waiting transact() learns of the end */
+    for (int i = 0; i < J2534_MAX_CH; i++)
+        if (g_dev.ring[i].ev) SetEvent(g_dev.ring[i].ev);   /* and so do the readers */
     log_line("reader: link closed");
     return 0;
+}
+
+/* 1.5: a device refusal in words for PassThruGetLastError. Until then a
+ * status the WiCAN answered left "no error" behind, and a tool's dialog
+ * said nothing useful (the field report of 2026-10-27). The codes are the
+ * wire protocol's (J2534_WIRE_PROTOCOL.md section 5). */
+static const char *device_status_text(long st)
+{
+    switch (st) {
+    case 0x01: return "the WiCAN refused: ERR_NOT_SUPPORTED (0x01): a protocol this firmware does not run (older firmware: the ECU-flashing gate, 'Allow ECU flashing' off)";
+    case 0x02: return "the WiCAN refused: ERR_INVALID_CHANNEL_ID (0x02): no such channel (disconnected, or the session was reset)";
+    case 0x03: return "the WiCAN refused: ERR_INVALID_PROTOCOL_ID (0x03)";
+    case 0x04: return "the WiCAN refused: ERR_NULL_PARAMETER (0x04)";
+    case 0x06: return "the WiCAN refused: ERR_INVALID_FLAGS (0x06)";
+    case 0x07: return "the WiCAN refused: ERR_FAILED (0x07): the CAN node is not transmitting (no bit rate proven on a silent bus with Automatic, a mismatch, listen-only: check /api/can), an ISO-TP send failed, or no free channel / periodic slot";
+    case 0x08: return "the WiCAN refused: ERR_DEVICE_NOT_CONNECTED (0x08): CONNECT before OPEN";
+    case 0x09: return "the WiCAN refused: ERR_TIMEOUT (0x09): the ISO-TP transfer timed out (no flow control or no answer from the ECU)";
+    case 0x0A: return "the WiCAN refused: ERR_INVALID_MSG (0x0A): malformed message (a CAN frame is the 4-byte id + 0..8 bytes, an ISO15765 message the id + the payload; extended addressing is not supported)";
+    case 0x0C: return "the WiCAN refused: ERR_EXCEEDED_LIMIT (0x0C): the channel's filter table (8) or its ISO-TP sessions (4) are full";
+    case 0x14: return "the WiCAN refused: ERR_MSG_PROTOCOL_ID (0x14): the message's protocol does not match the channel";
+    case 0x15: return "the WiCAN refused: ERR_INVALID_FILTER_ID (0x15)";
+    case 0x16: return "the WiCAN refused: ERR_NO_FLOW_CONTROL (0x16): a multi-frame ISO15765 message to an id with no FLOW_CONTROL filter";
+    case 0x18: return "the WiCAN refused: ERR_INVALID_BAUDRATE (0x18): the CAN bus runs at another bit rate (the WiCAN's setting, or what it read off the wire)";
+    case 0x1A: return "the WiCAN refused: ERR_DEVICE_IN_USE (0x1A): another tester is attached (TCP, USB serial or BLE)";
+    default:   return "the WiCAN refused the request (the status code is in the driver log)";
+    }
 }
 
 /* send a request, wait for its ACK. Returns J2534 status; *result set. */
@@ -407,6 +496,7 @@ static long transact(unsigned char type, unsigned channel,
     if (result) *result = g_dev.ack_result;
     st = (long)g_dev.ack_status;
     LeaveCriticalSection(&g_dev.req_cs);
+    if (st != STATUS_NOERROR) set_err(device_status_text(st));   /* 1.5 */
     return st;
 }
 
@@ -507,7 +597,10 @@ static void locks_delete(void)
 {
     DeleteCriticalSection(&g_dev.tx_cs);
     DeleteCriticalSection(&g_dev.req_cs);
-    for (int i=0;i<J2534_MAX_CH;i++) DeleteCriticalSection(&g_dev.ring[i].cs);
+    for (int i=0;i<J2534_MAX_CH;i++) {
+        DeleteCriticalSection(&g_dev.ring[i].cs);
+        if (g_dev.ring[i].ev) { CloseHandle(g_dev.ring[i].ev); g_dev.ring[i].ev = NULL; }
+    }
 }
 
 /* ---- J2534 API -------------------------------------------------------- */
@@ -567,7 +660,10 @@ J2534_API PassThruOpen(const void *pName, unsigned long *pDeviceID)
     g_dev.connected = 1;
     InitializeCriticalSection(&g_dev.tx_cs);
     InitializeCriticalSection(&g_dev.req_cs);
-    for (int i=0;i<J2534_MAX_CH;i++) InitializeCriticalSection(&g_dev.ring[i].cs);
+    for (int i=0;i<J2534_MAX_CH;i++) {
+        InitializeCriticalSection(&g_dev.ring[i].cs);
+        g_dev.ring[i].ev = CreateEventA(NULL, FALSE, FALSE, NULL);   /* auto-reset (1.4) */
+    }
     g_dev.reader_run = 1;
     g_dev.reader = CreateThread(NULL, 0, reader_thread, NULL, 0, NULL);
 
@@ -590,9 +686,10 @@ J2534_API PassThruOpen(const void *pName, unsigned long *pDeviceID)
     g_open = 1;
     if (pDeviceID) *pDeviceID = dev ? dev : 1;
     set_err("no error");
-    log_line("PassThruOpen: %s %s%s: ok, wire v%lu, device %lu (" DLL_VERSION ")",
+    log_line("PassThruOpen: %s %s%s: ok, wire v%lu, device %lu (" DLL_VERSION "); log %s",
              tgt.serial ? "serial" : "tcp", tgt.serial ? tgt.com : tgt.host,
-             tgt.serial ? "" : "", result, dev ? dev : 1);
+             tgt.serial ? "" : "", result, dev ? dev : 1,
+             g_log ? g_log_path : "off (OutputDebugString only)");
     return STATUS_NOERROR;
 }
 
@@ -659,16 +756,23 @@ J2534_API PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
     DWORD deadline = GetTickCount() + Timeout;
     while (got < want) {
         if (ring_pop(r, &pMsg[got])) { got++; continue; }
-        if (Timeout == 0 || (long)(GetTickCount() - deadline) >= 0) break;
-        Sleep(1);
+        if (Timeout == 0 || !g_dev.connected) break;
+        long left = (long)(deadline - GetTickCount());
+        if (left <= 0) break;
+        /* 1.4: wait for the reader thread's push instead of a Sleep(1)
+         * poll. Sleep(1) is the Windows timer period (15.6 ms unless some
+         * app raised it), so every frame a tool waited for cost up to a
+         * timer tick; bench 2026-10-27: 19 ms per TP 2.0 block-end ACK. */
+        if (r->ev) WaitForSingleObject(r->ev, (DWORD)left);
+        else Sleep(1);   /* no event (CreateEvent failed at open): the old poll */
     }
     *pNumMsgs = got;
     if (got) {
-        char hx[80];
+        char hx[3 * WW_MAX_DATA + 8];
         for (unsigned long i = 0; i < got; i++)
-            log_line("PassThruReadMsgs: channel %lu rx_status 0x%lX size %lu [%s]",
-                     ChannelID, pMsg[i].RxStatus, pMsg[i].DataSize,
-                     hex16(pMsg[i].Data, pMsg[i].DataSize, hx));
+            log_line("PassThruReadMsgs: channel %lu rx_status 0x%lX ts %lu size %lu [%s]",
+                     ChannelID, pMsg[i].RxStatus, pMsg[i].Timestamp, pMsg[i].DataSize,
+                     hex_all(pMsg[i].Data, pMsg[i].DataSize, hx));
         return STATUS_NOERROR;
     }
     /* Nothing read: ERR_BUFFER_EMPTY whatever the Timeout, as 1.1 and the
@@ -686,7 +790,7 @@ J2534_API PassThruWriteMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
     if (!pMsg || !pNumMsgs) return ERR_NULL_PARAMETER;
     static unsigned char buf[4 + 24 + WW_MAX_DATA];
     unsigned long sent = 0;
-    char hx[80];
+    char hx[3 * WW_MAX_DATA + 8];
     for (unsigned long i = 0; i < *pNumMsgs; i++) {
         if (pMsg[i].DataSize > WW_MAX_DATA) { *pNumMsgs = sent; set_err("message too long"); return ERR_INVALID_MSG; }
         put_u32(buf, 1);
@@ -694,7 +798,7 @@ J2534_API PassThruWriteMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
         long st = transact(WW_WRITE_MSGS, (unsigned)ChannelID, buf, (unsigned)n, NULL);
         log_line("PassThruWriteMsgs: channel %lu protocol %lu tx_flags 0x%lX size %lu [%s]: status 0x%lX",
                  ChannelID, pMsg[i].ProtocolID, pMsg[i].TxFlags, pMsg[i].DataSize,
-                 hex16(pMsg[i].Data, pMsg[i].DataSize, hx), (unsigned long)st);
+                 hex_all(pMsg[i].Data, pMsg[i].DataSize, hx), (unsigned long)st);
         if (st != STATUS_NOERROR) { *pNumMsgs = sent; return st; }
         sent++;
     }

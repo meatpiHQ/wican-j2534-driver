@@ -8,9 +8,11 @@
 ;      they use (USB = 192.168.82.1, SoftAP = 192.168.80.1, or a custom IP)
 ;   4. provides a normal Add/Remove Programs uninstall that deletes the
 ;      keys again
+;   5. creates the driver's log folder (Public Documents\WiCAN, 1.4) and a
+;      Start Menu shortcut to it, plus one to the user manual
 ;
 ; Build with build_installer.ps1 (or:  iscc /DDllPath=<path-to-dll> this-file).
-; Re-running the installer is the supported way to change Host/Port — it
+; Re-running the installer is the supported way to change Host/Port: it
 ; pre-selects the transport from the current registry values.
 
 #ifndef DllPath
@@ -43,8 +45,17 @@ Source: "{#DllPath}"; DestDir: "{app}"; Flags: ignoreversion
 ; Rendered from ..\USER_MANUAL.md by build_installer.ps1 (node + Edge headless)
 Source: "Output\USER_MANUAL.pdf"; DestDir: "{app}"; Flags: ignoreversion
 
+[Dirs]
+; the driver's log folder (1.4): the DLL writes wican_j2534.log there from
+; any user's tool, no admin rights needed (USER_MANUAL.md "Driver log")
+Name: "{commondocs}\WiCAN"; Permissions: users-modify
+
+[Icons]
+Name: "{autoprograms}\WiCAN J2534 driver log"; Filename: "{commondocs}\WiCAN"; Comment: "The driver's log: every message sent to the ECU and received from it"
+Name: "{autoprograms}\WiCAN J2534 user manual"; Filename: "{app}\USER_MANUAL.pdf"
+
 [Registry]
-; ---- 32-bit view (WOW6432Node on 64-bit Windows) — what 32-bit tools read.
+; ---- 32-bit view (WOW6432Node on 64-bit Windows): what 32-bit tools read.
 Root: HKLM32; Subkey: "SOFTWARE\PassThruSupport.04.04"; Flags: uninsdeletekeyifempty
 Root: HKLM32; Subkey: "SOFTWARE\PassThruSupport.04.04\WiCAN"; Flags: uninsdeletekey
 Root: HKLM32; Subkey: "SOFTWARE\PassThruSupport.04.04\WiCAN"; ValueType: string; ValueName: "Name"; ValueData: "WiCAN"
@@ -59,7 +70,7 @@ Root: HKLM32; Subkey: "SOFTWARE\WiCAN\J2534"; ValueType: dword; ValueName: "Port
 Root: HKLM32; Subkey: "SOFTWARE\WiCAN\J2534"; ValueType: string; ValueName: "Transport"; ValueData: "{code:GetTransport}"
 Root: HKLM32; Subkey: "SOFTWARE\WiCAN\J2534"; ValueType: string; ValueName: "ComPort"; ValueData: "auto"
 
-; ---- native 64-bit view — for the (rarer) 64-bit J2534 tools. Kept in sync.
+; ---- native 64-bit view: for the (rarer) 64-bit J2534 tools. Kept in sync.
 Root: HKLM64; Subkey: "SOFTWARE\PassThruSupport.04.04"; Flags: uninsdeletekeyifempty; Check: IsWin64
 Root: HKLM64; Subkey: "SOFTWARE\PassThruSupport.04.04\WiCAN"; Flags: uninsdeletekey; Check: IsWin64
 Root: HKLM64; Subkey: "SOFTWARE\PassThruSupport.04.04\WiCAN"; ValueType: string; ValueName: "Name"; ValueData: "WiCAN"; Check: IsWin64

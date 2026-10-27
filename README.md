@@ -6,8 +6,8 @@ drive a vehicle's CAN bus **through WiCAN**. The DLL translates the ~14
 `PassThru*` calls into WiCAN's wire protocol (`wican_wire.h`) over one of
 two transports to the firmware's `j2534_server`:
 
-- **TCP** — WiFi (STA or the WiCAN AP), USB-Ethernet, USB device NCM/RNDIS.
-- **Serial** — WiCAN as a USB CDC-ACM virtual COM port
+- **TCP**: WiFi (STA or the WiCAN AP), USB-Ethernet, USB device NCM/RNDIS.
+- **Serial**: WiCAN as a USB CDC-ACM virtual COM port
   (`device_class=cdc`, VID 16D0 PID 1263), the Tactrix-style COM-port
   J2534 device. The DLL can auto-discover the port by USB VID/PID.
 
@@ -33,6 +33,31 @@ no CAN-id prefix; the DLL passes it through the same way.
 
 ## Versions
 
+- **1.5 (2026-10-27)**: `PassThruGetLastError` explains a device refusal.
+  Until now a status the WiCAN answered (ERR_FAILED, ERR_INVALID_BAUDRATE,
+  ERR_NO_FLOW_CONTROL, ...) left the last-error text at "no error", so a
+  tool's dialog said nothing useful (the field report of 2026-10-27 showed
+  exactly that). Every non-zero device status now sets a sentence with the
+  code and the WiCAN-side reason ("the WiCAN refused: ERR_FAILED (0x07): the
+  CAN node is not transmitting (no bit rate proven on a silent bus ...)").
+  Pairs with the 2026-10-27 firmware, which no longer gates ECU-flashing
+  services: nothing a tool writes is refused for its content any more.
+- **1.4 (2026-10-27)**: `PassThruReadMsgs` waits on an event the reader
+  thread signals for every received message instead of polling the ring
+  with `Sleep(1)`. `Sleep(1)` sleeps one Windows timer period: 15.6 ms on a
+  PC where nothing raised the timer resolution, 1 to 2 ms where a browser
+  did, so every frame a tool waited for could cost a timer tick. Bench
+  2026-10-27 (a VW TP 2.0 flasher's pattern, one block-end ACK per 15
+  frames): the ECU saw the tool's ACK 2.8 ms after its frame over USB-serial
+  with the event, against up to 19 ms with the poll and a 16-message read.
+  An empty read still answers `ERR_BUFFER_EMPTY`. The **driver log is on by
+  default**: `C:\Users\Public\Documents\WiCAN\wican_j2534.log` (a folder
+  every user can write, no admin; the installer adds a Start Menu shortcut
+  to it), one line per call with every message's bytes in full in both
+  directions and the device timestamp on reads, 16 MB then one rotation to
+  `.1`; `WICAN_J2534_LOG` / the registry `LogFile` move it, `off` disables
+  it (1.2's 16-byte excerpt and "off unless set" are gone: a field report
+  should come with the log, not with a request to enable it).
 - **1.3 (2026-10-19)**: accepts the **J1850 VPW** protocol (id 1, GM Class
   2), which the firmware runs on the OBD chip; the DLL only adds it to the
   `PassThruConnect` accept list and passes its `[3-byte header][payload]`
@@ -53,7 +78,7 @@ no CAN-id prefix; the DLL passes it through the same way.
 
 ## Build
 
-32-bit is the safe default — most OEM J2534 apps load a **32-bit** DLL.
+32-bit is the safe default: most OEM J2534 apps load a **32-bit** DLL.
 
 **MSVC**
 ```
@@ -72,13 +97,13 @@ Output: `wican_j2534.dll`.
 ## Install
 
 **End users: use the installer.** `installer\build_installer.ps1` builds
-`wican_j2534_setup_<version>.exe` (Inno Setup 6 —
+`wican_j2534_setup_<version>.exe` (Inno Setup 6
 `winget install JRSoftware.InnoSetup`) from a built 32-bit DLL. The
 setup.exe copies the DLL to `Program Files (x86)\WiCAN`, asks which
 transport the user has (USB network / USB COM-port / SoftAP / custom IP),
 registers both registry views, and ships the user manual as a PDF
 (rendered at build time from USER_MANUAL.md via `installer\md2html.mjs`
-+ Edge headless — needs node.exe and Edge on the build PC); re-running
++ Edge headless, needs node.exe and Edge on the build PC); re-running
 it changes the transport, and uninstall removes everything. Manual steps
 below remain the dev path.
 
@@ -104,34 +129,36 @@ The DLL resolves the target in this order (strongest last wins):
 4. default `192.168.80.1:6809` (the WiCAN SoftAP gateway)
 
 Serial auto-discovery walks `HKLM\SYSTEM\CurrentControlSet\Enum\USB\`
-for keys **starting with** `VID_16D0&PID_1263` (prefix match — CDC-ACM
+for keys **starting with** `VID_16D0&PID_1263` (prefix match: CDC-ACM
 is a composite device, so the COM child sits under `...&MI_00`), reads
 their `PortName`s, and uses the first one that opens (a successful open
 is the presence test; the SYSTEM hive is not WOW64-redirected).
 
 Typical setups:
-- **WiFi STA** — WiCAN on the shop LAN: set `Host` to its LAN IP.
-- **WiCAN AP** — connect the PC to WiCAN's WiFi: use the AP gateway IP.
-- **USB-Ethernet (host)** — WiCAN's wired-uplink IP.
-- **USB-device NCM/RNDIS** — plug WiCAN into the PC
+- **WiFi STA**: WiCAN on the shop LAN: set `Host` to its LAN IP.
+- **WiCAN AP**: connect the PC to WiCAN's WiFi: use the AP gateway IP.
+- **USB-Ethernet (host)**: WiCAN's wired-uplink IP.
+- **USB-device NCM/RNDIS**: plug WiCAN into the PC
   (`usb_host_manager.role=device`, `device_class=ncm`); it appears as a
   network adapter ("MeatPi Electronics WiCAN Pro", inbox `UsbNcm.sys` on
   Win10/11) and serves DHCP on the link. Set `Host` to **`192.168.82.1`**
-  (the USB-link address — the .80.1 default is the WiFi AP). Driver-tested
+  (the USB-link address, the .80.1 default is the WiFi AP). Driver-tested
   end-to-end over the cable 2026-07-08.
-- **USB-device CDC-ACM (serial)** — `device_class=cdc`: WiCAN enumerates as
+- **USB-device CDC-ACM (serial)**: `device_class=cdc`: WiCAN enumerates as
   a virtual COM port (inbox `usbser.sys` → "USB Serial Device (COMn)",
   VID 16D0 PID 1263) carrying the same framed wire protocol over serial
   instead of TCP. The DLL opens it overlapped with DTR asserted (the
   firmware gates the serial session on DTR); set `Transport=serial` in
   the registry (or `WICAN_J2534_COM=auto`) and the port is found by
-  VID/PID — no configuration at all. Firmware side bench-tested by
+  VID/PID: no configuration at all. Firmware side bench-tested by
   `tools/testbench/j2534_serial_test.py`.
 
 On the firmware side, enable the server:
 `/api/settings/j2534_server` → `{"enabled":true,"port":6809}` (reboot).
-Two safety gates default off: `allow_reflash` (blocks ECU flashing) and
-`allow_lan` (AP+USB only). See `TESTING_DREWTECH.md` §6.
+One exposure gate defaults off: `allow_lan` (AP+USB only). The device
+forwards every write since the firmware of 2026-10-27 (the old
+`allow_reflash` content gate is gone; `/api/j2534` counts the reprogramming
+services it saw as `reflash_seen`). See `TESTING_DREWTECH.md` §6.
 
 ## Test without a tool
 
