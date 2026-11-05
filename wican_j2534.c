@@ -51,6 +51,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <mmsystem.h>   /* timeBeginPeriod: the write join window (1.6) */
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,11 +62,12 @@
 
 #ifdef _MSC_VER
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "winmm.lib")
 #endif
 
 #define J2534_MAX_CH  8
 #define RX_RING       256
-#define DLL_VERSION   "WiCAN J2534 1.5"
+#define DLL_VERSION   "WiCAN J2534 1.6"
 /* longer than the device's longest WRITE (a multi-frame send at a slow
  * STmin is capped at 5.5 s on the device side) */
 #define ACK_WAIT_MS   8000
@@ -103,6 +105,33 @@ typedef struct {
     volatile unsigned long ack_status;
     volatile unsigned long ack_result;
 
+    /* 1.6: queued writes. PassThruWriteMsgs with Timeout 0 returns once
+     * the request is on the link (SAE J2534-1: "queue and return"); the
+     * device's ACK comes in behind it on the reader thread, and a refusal
+     * is kept for the next PassThruWriteMsgs call. write_wait = every
+     * write waits for its ACK (the 1.5 behaviour; registry WriteWait or
+     * env WICAN_J2534_WRITE_WAIT = 1). */
+    int                    write_wait;
+    volatile unsigned long deferred_status;   /* 0 = none pending */
+    volatile unsigned      deferred_seq;
+
+    /* 1.6: a queued write is held for about a millisecond so the writes
+     * that follow it join the same request (a tool that sends a block
+     * frame by frame, 15 calls in a row, costs the device ONE request
+     * instead of 15; bench 2026-11-06: 11.2 min for a 2 MB write over
+     * WiFi against 6.5 with the join). Any other call flushes first, so a
+     * write followed by a read goes out at once. The flusher thread's
+     * Sleep(1) is one timer period: timeBeginPeriod(1) while open. */
+    CRITICAL_SECTION pend_cs;
+    HANDLE           flush_ev;        /* auto-reset: something is pending */
+    HANDLE           flusher;
+    volatile int     flusher_run;
+    int              timer_up;        /* timeBeginPeriod(1) is in effect */
+    unsigned         pend_channel;
+    unsigned         pend_count;
+    unsigned         pend_n;          /* bytes used in pend_buf (4 + messages) */
+    unsigned char    pend_buf[WW_REQ_CAP];
+
     rx_ring_t     ring[J2534_MAX_CH];
     unsigned long ch_proto[J2534_MAX_CH];
     unsigned long ch_baud[J2534_MAX_CH];
@@ -115,6 +144,8 @@ static char g_last_error[256] = "no error";
 
 static void set_err(const char *m)
 { strncpy(g_last_error, m, sizeof(g_last_error) - 1); g_last_error[sizeof(g_last_error)-1] = 0; }
+static const char *device_status_text(long st);   /* below; the reader thread uses it (1.6) */
+static long flush_pending(void);                   /* below; transact() flushes a held write first (1.6) */
 
 /* ---- the driver log ---------------------------------------------------- */
 /*
@@ -411,9 +442,17 @@ static DWORD WINAPI reader_thread(LPVOID arg)
         if (len && !io_read_all(payload, (int)len)) break;
 
         if (type == WW_ACK) {
-            g_dev.ack_status = (len>=4) ? get_u32(payload) : ERR_FAILED;
-            g_dev.ack_result = (len>=8) ? get_u32(payload+4) : 0;
-            if (seq == g_dev.await_seq) { g_dev.ack_ready = 1; SetEvent(g_dev.ack_ev); }
+            unsigned long st  = (len>=4) ? get_u32(payload) : ERR_FAILED;
+            unsigned long res = (len>=8) ? get_u32(payload+4) : 0;
+            if (seq == g_dev.await_seq && !g_dev.ack_ready) {
+                g_dev.ack_status = st; g_dev.ack_result = res;
+                g_dev.ack_ready = 1; SetEvent(g_dev.ack_ev);
+            } else if (st != STATUS_NOERROR && !g_dev.deferred_status) {
+                /* a queued write's ACK (1.6): kept for the next write call */
+                g_dev.deferred_seq = seq; g_dev.deferred_status = st;
+                log_line("reader: the queued write seq %u was refused: status 0x%lX (%s)",
+                         seq, st, device_status_text((long)st));
+            }
         } else if (type == WW_RX_MSG && ch >= 1 && ch <= J2534_MAX_CH) {
             PASSTHRU_MSG m; decode_msg(payload, (int)len, &m);
             ring_push(&g_dev.ring[ch-1], &m);
@@ -462,6 +501,7 @@ static long transact(unsigned char type, unsigned channel,
     unsigned char hdr[WW_HDR_SIZE];
     long st;
     if (!g_dev.connected) { set_err("not connected"); return ERR_DEVICE_NOT_CONNECTED; }
+    flush_pending();   /* a held write goes before this request (1.6) */
 
     EnterCriticalSection(&g_dev.req_cs);
     EnterCriticalSection(&g_dev.tx_cs);
@@ -500,9 +540,71 @@ static long transact(unsigned char type, unsigned channel,
     return st;
 }
 
+/* 1.6: send a request and return as soon as it is on the link; the
+ * reader thread takes its ACK (a refusal goes to deferred_status). Takes
+ * only the link's write lock, so a transact() waiting on another thread
+ * is not held up and its ACK is still matched by seq. */
+static long send_nowait(unsigned char type, unsigned channel,
+                        const unsigned char *payload, unsigned len,
+                        unsigned *out_seq)
+{
+    unsigned char hdr[WW_HDR_SIZE];
+    if (!g_dev.connected) { set_err("not connected"); return ERR_DEVICE_NOT_CONNECTED; }
+
+    EnterCriticalSection(&g_dev.tx_cs);
+    g_dev.seq = (g_dev.seq + 1) & 0xFFFF;
+    unsigned myseq = g_dev.seq;
+    put_u16(hdr+0, WW_MAGIC); hdr[2]=WW_VERSION; hdr[3]=type;
+    put_u16(hdr+4, myseq); put_u16(hdr+6, channel); put_u32(hdr+8, len);
+    int ok = io_write_all(hdr, WW_HDR_SIZE) &&
+             (!len || io_write_all(payload, len));
+    LeaveCriticalSection(&g_dev.tx_cs);
+
+    if (out_seq) *out_seq = myseq;
+    if (!ok) { set_err("device write failed"); return ERR_DEVICE_NOT_CONNECTED; }
+    return STATUS_NOERROR;
+}
+
+/* the pending write request, if any, onto the link (pend_cs held) */
+static long flush_locked(void)
+{
+    long st = STATUS_NOERROR;
+    if (g_dev.pend_count) {
+        unsigned seq = 0;
+        put_u32(g_dev.pend_buf, g_dev.pend_count);
+        st = send_nowait(WW_WRITE_MSGS, g_dev.pend_channel, g_dev.pend_buf, g_dev.pend_n, &seq);
+        log_line("write request: channel %u, %u message(s) in one request, seq %u%s",
+                 g_dev.pend_channel, g_dev.pend_count, seq, st != STATUS_NOERROR ? " (the link write failed)" : "");
+        g_dev.pend_count = 0; g_dev.pend_n = 0;
+    }
+    return st;
+}
+
+static long flush_pending(void)
+{
+    long st;
+    EnterCriticalSection(&g_dev.pend_cs);
+    st = flush_locked();
+    LeaveCriticalSection(&g_dev.pend_cs);
+    return st;
+}
+
+static DWORD WINAPI flusher_thread(LPVOID arg)
+{
+    (void)arg;
+    while (g_dev.flusher_run) {
+        WaitForSingleObject(g_dev.flush_ev, INFINITE);
+        if (!g_dev.flusher_run) break;
+        Sleep(1);               /* the join window */
+        flush_pending();
+    }
+    return 0;
+}
+
 /* ---- connection setup ------------------------------------------------- */
 
 typedef struct {
+    int  write_wait;  /* 1.6: every PassThruWriteMsgs waits for the device's ACK */
     int  serial;      /* 1 = CDC-ACM COM port, 0 = TCP */
     char com[16];     /* "COM7"; "" = auto-discover by USB VID/PID */
     char host[128];
@@ -540,8 +642,12 @@ static void resolve_target(target_t *t)
         RegQueryValueExA(k, "ComPort", NULL, &type, (LPBYTE)t->com, &sz);
         sz = sizeof(t->log);
         RegQueryValueExA(k, "LogFile", NULL, &type, (LPBYTE)t->log, &sz);
+        DWORD ww = 0; sz = sizeof(ww);
+        if (RegQueryValueExA(k, "WriteWait", NULL, &type, (LPBYTE)&ww, &sz) == ERROR_SUCCESS)
+            t->write_wait = ww != 0;
         RegCloseKey(k);
     }
+    if ((e = getenv("WICAN_J2534_WRITE_WAIT"))) t->write_wait = atoi(e) != 0;
     t->host[sizeof(t->host)-1] = 0; t->com[sizeof(t->com)-1] = 0; t->log[sizeof(t->log)-1] = 0;
     if (is_com_name(t->host)) {          /* Host="COM7" shorthand */
         t->serial = 1;
@@ -575,6 +681,11 @@ static void resolve_target(target_t *t)
 static void transport_teardown(void)
 {
     g_dev.reader_run = 0; g_dev.connected = 0;
+    if (g_dev.flusher) {           /* 1.6: the join-window thread first */
+        g_dev.flusher_run = 0; SetEvent(g_dev.flush_ev);
+        WaitForSingleObject(g_dev.flusher, 1000); CloseHandle(g_dev.flusher); g_dev.flusher = NULL;
+    }
+    if (g_dev.timer_up) { timeEndPeriod(1); g_dev.timer_up = 0; }
     if (g_dev.is_serial) {
         if (g_dev.reader) { WaitForSingleObject(g_dev.reader, 1500); CloseHandle(g_dev.reader); }
         if (g_dev.hcom && g_dev.hcom != INVALID_HANDLE_VALUE) {
@@ -597,6 +708,8 @@ static void locks_delete(void)
 {
     DeleteCriticalSection(&g_dev.tx_cs);
     DeleteCriticalSection(&g_dev.req_cs);
+    DeleteCriticalSection(&g_dev.pend_cs);
+    if (g_dev.flush_ev) { CloseHandle(g_dev.flush_ev); g_dev.flush_ev = NULL; }
     for (int i=0;i<J2534_MAX_CH;i++) {
         DeleteCriticalSection(&g_dev.ring[i].cs);
         if (g_dev.ring[i].ev) { CloseHandle(g_dev.ring[i].ev); g_dev.ring[i].ev = NULL; }
@@ -614,6 +727,7 @@ J2534_API PassThruOpen(const void *pName, unsigned long *pDeviceID)
     resolve_target(&tgt);
     log_open(tgt.log);
     memset(&g_dev, 0, sizeof(g_dev));
+    g_dev.write_wait = tgt.write_wait;
 
     if (tgt.serial) {
         HANDLE h = tgt.com[0] ? com_open(tgt.com)
@@ -660,12 +774,18 @@ J2534_API PassThruOpen(const void *pName, unsigned long *pDeviceID)
     g_dev.connected = 1;
     InitializeCriticalSection(&g_dev.tx_cs);
     InitializeCriticalSection(&g_dev.req_cs);
+    InitializeCriticalSection(&g_dev.pend_cs);
+    g_dev.flush_ev = CreateEventA(NULL, FALSE, FALSE, NULL);         /* auto-reset (1.6) */
     for (int i=0;i<J2534_MAX_CH;i++) {
         InitializeCriticalSection(&g_dev.ring[i].cs);
         g_dev.ring[i].ev = CreateEventA(NULL, FALSE, FALSE, NULL);   /* auto-reset (1.4) */
     }
     g_dev.reader_run = 1;
     g_dev.reader = CreateThread(NULL, 0, reader_thread, NULL, 0, NULL);
+    timeBeginPeriod(1);            /* the join window's Sleep(1) = 1 ms, not 15.6 */
+    g_dev.timer_up = 1;
+    g_dev.flusher_run = 1;
+    g_dev.flusher = g_dev.flush_ev ? CreateThread(NULL, 0, flusher_thread, NULL, 0, NULL) : NULL;
 
     unsigned long result = 0;
     unsigned char p[4]; put_u32(p, WW_VERSION);
@@ -751,6 +871,7 @@ J2534_API PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
 {
     if (!g_open || ChannelID<1 || ChannelID>J2534_MAX_CH) return ERR_INVALID_CHANNEL_ID;
     if (!pMsg || !pNumMsgs) return ERR_NULL_PARAMETER;
+    flush_pending();   /* a held write goes out before the tool waits for its answer (1.6) */
     unsigned long want = *pNumMsgs, got = 0;
     rx_ring_t *r = &g_dev.ring[ChannelID-1];
     DWORD deadline = GetTickCount() + Timeout;
@@ -782,25 +903,84 @@ J2534_API PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
     return ERR_BUFFER_EMPTY;
 }
 
+/* 1.6 (the VW TP 2.0 speed report of 2026-11-05): a tool that acknowledges
+ * every block of a transfer paid the device's round trip on every ACK it
+ * wrote, because every message was its own request and the call waited
+ * for the device's ACK. Now: one WRITE_MSGS request per call with every
+ * message in it (the device takes a batch up to its request cap), and
+ * with Timeout 0 the call returns once the request is on the link, as
+ * SAE J2534-1 says ("queue and return"); the device's answer comes in on
+ * the reader thread, and a refusal is reported by the NEXT call, which
+ * then sends nothing. A non-zero Timeout, or WriteWait, waits as 1.5 did. */
 J2534_API PassThruWriteMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
                             unsigned long *pNumMsgs, unsigned long Timeout)
 {
-    (void)Timeout;
     if (!g_open || ChannelID<1 || ChannelID>J2534_MAX_CH) return ERR_INVALID_CHANNEL_ID;
     if (!pMsg || !pNumMsgs) return ERR_NULL_PARAMETER;
-    static unsigned char buf[4 + 24 + WW_MAX_DATA];
-    unsigned long sent = 0;
+    static unsigned char buf[WW_REQ_CAP];
+    unsigned long want = *pNumMsgs, sent = 0;
     char hx[3 * WW_MAX_DATA + 8];
-    for (unsigned long i = 0; i < *pNumMsgs; i++) {
-        if (pMsg[i].DataSize > WW_MAX_DATA) { *pNumMsgs = sent; set_err("message too long"); return ERR_INVALID_MSG; }
-        put_u32(buf, 1);
-        int n = 4 + encode_msg(&pMsg[i], buf + 4);
-        long st = transact(WW_WRITE_MSGS, (unsigned)ChannelID, buf, (unsigned)n, NULL);
-        log_line("PassThruWriteMsgs: channel %lu protocol %lu tx_flags 0x%lX size %lu [%s]: status 0x%lX",
-                 ChannelID, pMsg[i].ProtocolID, pMsg[i].TxFlags, pMsg[i].DataSize,
-                 hex_all(pMsg[i].Data, pMsg[i].DataSize, hx), (unsigned long)st);
+    int wait = g_dev.write_wait || Timeout != 0;
+
+    if (g_dev.deferred_status) {
+        long st = (long)g_dev.deferred_status;
+        g_dev.deferred_status = 0;
+        set_err(device_status_text(st));
+        log_line("PassThruWriteMsgs: channel %lu: the queued write seq %u was refused "
+                 "(status 0x%lX): reported now, nothing of this call sent",
+                 ChannelID, g_dev.deferred_seq, (unsigned long)st);
+        *pNumMsgs = 0;
+        return st;
+    }
+
+    if (!wait) {
+        /* queue and return: into the pending request, which the flusher
+         * sends after the join window (or the next call sends first) */
+        if (!g_dev.connected) { *pNumMsgs = 0; set_err("not connected"); return ERR_DEVICE_NOT_CONNECTED; }
+        for (unsigned long i = 0; i < want; i++) {
+            const PASSTHRU_MSG *m = &pMsg[i];
+            if (m->DataSize > WW_MAX_DATA) { *pNumMsgs = sent; set_err("message too long"); return ERR_INVALID_MSG; }
+            EnterCriticalSection(&g_dev.pend_cs);
+            if (g_dev.pend_count &&
+                (g_dev.pend_channel != (unsigned)ChannelID ||
+                 g_dev.pend_n + 24 + m->DataSize > sizeof(g_dev.pend_buf)))
+                flush_locked();
+            if (!g_dev.pend_count) { g_dev.pend_channel = (unsigned)ChannelID; g_dev.pend_n = 4; }
+            g_dev.pend_n += (unsigned)encode_msg(m, g_dev.pend_buf + g_dev.pend_n);
+            g_dev.pend_count++;
+            int first = g_dev.pend_count == 1;
+            LeaveCriticalSection(&g_dev.pend_cs);
+            if (first && g_dev.flush_ev) SetEvent(g_dev.flush_ev);
+            log_line("PassThruWriteMsgs: channel %lu protocol %lu tx_flags 0x%lX size %lu [%s]: queued",
+                     ChannelID, m->ProtocolID, m->TxFlags, m->DataSize, hex_all(m->Data, m->DataSize, hx));
+            sent++;
+        }
+        if (!g_dev.flusher) flush_pending();   /* no join-window thread: out now */
+        *pNumMsgs = sent;
+        return STATUS_NOERROR;
+    }
+
+    flush_pending();   /* in order: what was queued goes before this call's messages */
+    while (sent < want) {
+        unsigned n = 4, count = 0, seq = 0;
+        unsigned long first = sent;
+        while (sent + count < want) {
+            const PASSTHRU_MSG *m = &pMsg[sent + count];
+            if (m->DataSize > WW_MAX_DATA) { *pNumMsgs = sent; set_err("message too long"); return ERR_INVALID_MSG; }
+            if (count > 0 && n + 24 + m->DataSize > sizeof(buf)) break;   /* the next request */
+            n += (unsigned)encode_msg(m, buf + n);
+            count++;
+        }
+        put_u32(buf, count);
+        (void)seq;
+        long st = transact(WW_WRITE_MSGS, (unsigned)ChannelID, buf, n, NULL);
+        for (unsigned long i = first; i < first + count; i++)
+            log_line("PassThruWriteMsgs: channel %lu protocol %lu tx_flags 0x%lX size %lu [%s]: status 0x%lX%s",
+                     ChannelID, pMsg[i].ProtocolID, pMsg[i].TxFlags, pMsg[i].DataSize,
+                     hex_all(pMsg[i].Data, pMsg[i].DataSize, hx), (unsigned long)st,
+                     count > 1 ? " (one request for the batch)" : "");
         if (st != STATUS_NOERROR) { *pNumMsgs = sent; return st; }
-        sent++;
+        sent += count;
     }
     *pNumMsgs = sent;
     return STATUS_NOERROR;

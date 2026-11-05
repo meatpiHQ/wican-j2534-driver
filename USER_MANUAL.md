@@ -173,7 +173,7 @@ Windows Registry Editor Version 5.00
 ### 5c. How the DLL finds the WiCAN (resolution order)
 
 1. Environment: `WICAN_J2534_COM` (`COM7`, or `auto` to search by USB
-   id) — forces the **serial** transport
+   id): forces the **serial** transport
 2. Environment: `WICAN_J2534_HOST` / `WICAN_J2534_PORT` (a `COMn` value
    in `Host` selects serial too)
 3. Registry: `HKLM\SOFTWARE\WiCAN\J2534` → `Transport` (`tcp`/`serial`),
@@ -183,8 +183,20 @@ Windows Registry Editor Version 5.00
 
 So you can override the target quickly with an environment variable
 without touching the registry. In serial mode with `ComPort=auto` the
-driver locates the WiCAN's COM port by its USB id (VID 16D0 PID 1263)
-— no port number to configure.
+driver locates the WiCAN's COM port by its USB id (VID 16D0 PID 1263),
+no port number to configure.
+
+One more value, for the write path (driver 1.6): `WriteWait` (a DWORD
+under the same registry key) or the environment variable
+`WICAN_J2534_WRITE_WAIT`. With it set to 1, every `PassThruWriteMsgs`
+waits for the WiCAN's answer before it returns, as driver 1.5 did. By
+default a call with `Timeout` 0 queues its messages and returns (SAE
+J2534-1: "queue and return"); the queued messages are held for about a
+millisecond so that the writes that follow join them in one request to
+the WiCAN (a read, or any other call, sends them first), the WiCAN's
+answer arrives behind, and a refusal is reported by the next write call,
+which then sends nothing. A tool that passes a non-zero `Timeout` always
+waits.
 
 ---
 

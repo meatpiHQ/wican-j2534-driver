@@ -33,6 +33,44 @@ no CAN-id prefix; the DLL passes it through the same way.
 
 ## Versions
 
+- **1.6 (2026-11-06)**: the write path no longer costs a device round trip
+  per message. With `Timeout` 0, `PassThruWriteMsgs` queues the message
+  and returns, as SAE J2534-1 says ("queue and return") and as the Tactrix
+  Openport driver does; the queued messages are held for about a
+  millisecond so that the writes that follow join them, and go to the
+  WiCAN in ONE `WRITE_MSGS` request (up to the device's request cap, 4384
+  bytes; any other call, a read above all, sends what is held first, so a
+  write followed by a read goes out at once). Until now every message was
+  its own request and the call waited for the WiCAN's ACK, so a tool that
+  sends or acknowledges a transfer frame by frame (a VW TP 2.0 flasher: 37
+  frames per 255-byte block, one ACK per 15 frames; the field report of
+  2026-10-27 and 2026-11-05, "20 min on an Openport, 40 on the WiCAN")
+  paid the link's round trip on every frame it wrote. Bench 2026-11-06, a
+  2 MB TP 2.0 transfer projected from 40 blocks over the WiCAN's own WiFi
+  hotspot: the write direction 18.8 min with 1.5's wait, 3.1 min now; the
+  read direction is set by the link's round trip per block end, which the
+  firmware of the same day trims (USB CDC 2.4 to 1.3 ms, the Openport's
+  1.4). The WiCAN's answer to a queued write arrives on the reader thread;
+  a refusal is logged and reported by the next `PassThruWriteMsgs` call,
+  which then sends nothing (the conditions a write is refused for are the
+  channel's, not the message's). A non-zero `Timeout` waits for the ACK as
+  before, and the registry value `WriteWait` (DWORD 1) or the environment
+  variable `WICAN_J2534_WRITE_WAIT=1` makes every write wait (the 1.5
+  behaviour). One consequence to know: a tool's response timer (UDS P2,
+  50 ms in udsoncan and in what most ECUs advertise) now starts when the
+  write is queued, not after the link's round trip, so on a link slower
+  than the tool's P2 a request that scraped through with 1.5 (the wait hid
+  half the round trip from the timer) times out with 1.6. Bench
+  2026-11-06: udsoncan over the Pi tunnel (46 ms per round trip) failed
+  its 50 ms P2 with the default and passed with `WriteWait`; over the
+  WiCAN's own hotspot (5 ms) it passed with the default. Such a link is
+  too slow for such a tool either way; `WriteWait` is the knob when a tool
+  cannot raise its P2. `timeBeginPeriod(1)` is in effect while the device
+  is open (the join window's sleep would otherwise be a 15.6 ms timer
+  tick). Pairs
+  with the firmware of 2026-11-06, whose RX pump wakes on the bus frame
+  instead of polling every 2 ms and coalesces a burst of received frames
+  into one transport write; either side works with the other.
 - **1.5 (2026-10-27)**: `PassThruGetLastError` explains a device refusal.
   Until now a status the WiCAN answered (ERR_FAILED, ERR_INVALID_BAUDRATE,
   ERR_NO_FLOW_CONTROL, ...) left the last-error text at "no error", so a

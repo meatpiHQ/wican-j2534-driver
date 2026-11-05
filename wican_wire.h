@@ -1,5 +1,5 @@
 /*
- * wican_wire.h — the WiCAN J2534 wire protocol (mirrors the firmware's
+ * wican_wire.h: the WiCAN J2534 wire protocol (mirrors the firmware's
  * components/j2534_server/include/j2534_proto.h). Keep the two in sync.
  */
 #ifndef WICAN_WIRE_H
@@ -11,6 +11,10 @@
 #define WW_VERSION      1
 #define WW_HDR_SIZE     12
 #define WW_MAX_DATA     4128
+/* the device's request payload cap (J2534_RX_CAP): one WRITE_MSGS with
+ * its count word and every message that fits (1.6 batches a call's
+ * messages into one request) */
+#define WW_REQ_CAP      (WW_MAX_DATA + 256)
 
 /* message types */
 #define WW_HELLO          0x01
