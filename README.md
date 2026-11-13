@@ -44,19 +44,26 @@ no CAN-id prefix; the DLL passes it through the same way.
 
 ## Versions
 
-Unreleased: `READ_VBATT` asks the device for its measured battery voltage
-in millivolts instead of returning a nominal 12,000. It needs the matching
-firmware support. Older firmware with no result returns `ERR_NOT_SUPPORTED`;
-an unavailable ADC reading returns the device's error. Failed calls leave the
-output untouched. A null output and an invalid device id are refused. The id
-is the device id of `PassThruOpen` (SAE J2534-1); an id in the channel range
-is answered as well, because tools that pass their channel id there were
-answered by every earlier version and the reading is device-wide.
-Build without installing with `.\build.ps1`. In the firmware checkout,
-`.\test.ps1 j2534vbat driver -SkipBenchCheck` checks the DLL against a fake
-device; `.\test.ps1 j2534vbat` also checks two real supply voltages.
-Set `WICAN_J2534_DLL` to the freshly built DLL to test it before installation.
-
+- **1.7 (2026-11-14)**: the measured battery voltage, and the licence.
+  `READ_VBATT` asks the device for its measured battery voltage in
+  millivolts instead of returning a nominal 12,000 by itself. It needs the
+  matching firmware support (WiCAN PRO 6.0.0-beta.10 or later). Older
+  firmware with no result returns `ERR_NOT_SUPPORTED` ("WiCAN returned no
+  result; update the device firmware"), never an invented value; an
+  unavailable ADC reading returns the device's error. Failed calls leave
+  the output untouched. A null output and an invalid device id are
+  refused. The id is the device id of `PassThruOpen` (SAE J2534-1); an id
+  in the channel range is answered as well, because tools that pass their
+  channel id there were answered by every earlier version and the reading
+  is device-wide. The driver is licensed under the GNU General Public
+  License, version 3 from this version on (`LICENSE`, an SPDX header in
+  every source file), and the installer opens with the disclaimer
+  (`DISCLAIMER.txt`, "use at your own risk"): it goes on only when the
+  user accepts it, and installs the disclaimer and the licence
+  (`LICENSE.txt`) next to the DLL. A silent install
+  (`/SILENT`, `/VERYSILENT`) shows no wizard pages, so no disclaimer
+  page either; the two files are installed all the same. The DLL's
+  behaviour is otherwise that of 1.6.
 - **1.6 (2026-11-06)**: the write path no longer costs a device round trip
   per message. With `Timeout` 0, `PassThruWriteMsgs` queues the message
   and returns, as SAE J2534-1 says ("queue and return") and as the Tactrix
@@ -154,7 +161,15 @@ cmake -G "MinGW Makefiles" -DCMAKE_C_FLAGS=-m32 -B build
 cmake --build build
 ```
 
-Output: `wican_j2534.dll`.
+Output: `wican_j2534.dll`. On a PC with MSVC, `.\build.ps1` does the
+configure and the build in one step and installs nothing.
+
+To test a build before it is installed, set `WICAN_J2534_DLL` to the
+built DLL's full path and run the driver gates from a checkout of the
+firmware repository ([wican-fw](https://github.com/meatpiHQ/wican-fw),
+branch `dev-v6`): `.\test.ps1 j2534vbat driver -SkipBenchCheck` checks the
+DLL against a fake device on the PC alone; `.\test.ps1 j2534vbat` also
+checks two real supply voltages and needs that repository's bench.
 
 ## Install
 

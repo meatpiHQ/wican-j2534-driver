@@ -51,10 +51,11 @@ network to the WiCAN firmware, which drives the CAN bus.
   `StartPeriodicMsg / StopPeriodicMsg` (tester-present), `Ioctl`
   (`READ_VBATT`, the `CLEAR_*` buffers), `ReadVersion`, `GetLastError`.
 
-The unreleased voltage update reads the WiCAN's calibrated battery voltage in
-millivolts. It requires matching firmware support; old firmware without a
-voltage result returns `ERR_NOT_SUPPORTED`. Driver 1.6 and earlier return a
-nominal 12.0 V instead, so update both sides for a measured reading.
+Since driver 1.7, `READ_VBATT` reads the WiCAN's calibrated battery voltage
+in millivolts. It requires matching firmware support (WiCAN PRO
+6.0.0-beta.10 or later); old firmware without a voltage result returns
+`ERR_NOT_SUPPORTED`. Driver 1.6 and earlier return a nominal 12.0 V
+instead, so update both sides for a measured reading.
 
 **Not supported**
 - J1850 PWM, ISO9141 and ISO14230 (KWP2000 over K-line), SCI: these answer
@@ -238,7 +239,7 @@ Any J2534 tool works the same way. Below is the flow using the free
    see:
    - Supported Protocols: `CAN, ISO15765`
    - Device Firmware Version: `WiCAN v6`
-   - J2534 DLL Version: `WiCAN J2534 1.5`
+   - J2534 DLL Version: `WiCAN J2534 1.7`
    - SAE J2534 API Version: `04.04`
 3. **Connect.** Protocol **ISO15765**, Baud **500000**, Connect. →
    `PassThruConnect`.
@@ -382,7 +383,7 @@ since 1.4, so a problem can be shown instead of described:
 - **Ports/IPs:** TCP **6809**; USB-device `192.168.82.1`, AP
   `192.168.80.1`. USB-serial: COM port, VID `16D0` PID `1263`.
 - **Version strings** (`PassThruReadVersion`): firmware `WiCAN v6`, DLL
-  `WiCAN J2534 1.5`, API `04.04`.
+  `WiCAN J2534 1.7`, API `04.04`.
 - **Driver log:** on by default (1.4) at
   `C:\Users\Public\Documents\WiCAN\wican_j2534.log` (Start Menu: "WiCAN
   J2534 driver log"), one line per call with every message's bytes in full

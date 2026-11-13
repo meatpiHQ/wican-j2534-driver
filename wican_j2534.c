@@ -78,7 +78,7 @@
 
 #define J2534_MAX_CH  8
 #define RX_RING       256
-#define DLL_VERSION   "WiCAN J2534 1.6"
+#define DLL_VERSION   "WiCAN J2534 1.7"
 /* longer than the device's longest WRITE (a multi-frame send at a slow
  * STmin is capped at 5.5 s on the device side) */
 #define ACK_WAIT_MS   8000
