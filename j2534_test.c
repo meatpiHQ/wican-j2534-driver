@@ -14,7 +14,8 @@
  * WiCAN DLL. Loads wican_j2534.dll like a real PassThru app (LoadLibrary
  * + GetProcAddress), opens an ISO15765 channel, sets the flow-control
  * filter, and drives a UDS reflash preamble against whatever ECU is on
- * WiCAN's CAN bus (use pcan_reflash_ecu.py on the bench).
+ * WiCAN's CAN bus (for one on the bench: the firmware repository's
+ * tools/testbench/actors/pcan_reflash_ecu.py).
  *
  * Point the DLL at the device via WICAN_J2534_HOST / WICAN_J2534_PORT
  * (or the registry). Build: see README (mingw or MSVC).
@@ -118,10 +119,10 @@ int main(void)
     #define HEX2(b0,b1) (resp[0]==(b0)&&resp[1]==(b1))
 
     if (getenv("WICAN_J2534_ECUSIM")) {
-        /* wican-ecu-sim-fw "realistic reprogramming" flow (matches the
-         * sim's tools/testbench/pcan_reflash.py): fingerprint-gated,
-         * validated 0x08000000 flash window, CRC-checked transfer.
-         * Exercises multi-frame ISO-TP both directions + a 0x78 storm. */
+        /* A hardware ECU simulator's "realistic reprogramming" flow:
+         * fingerprint-gated, a validated flash window, a CRC-checked
+         * transfer. Exercises multi-frame ISO-TP in both directions and
+         * a 0x78 (response pending) storm. */
         uds(ch, (unsigned char[]){0x11,0x01}, 2, resp, &rl, 800);
         check("reset 11 01 -> 51 01", rl>=2 && HEX2(0x51,0x01), "");
 

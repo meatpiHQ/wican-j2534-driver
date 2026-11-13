@@ -1,6 +1,6 @@
 # WiCAN J2534 PassThru — User Manual
 
-The WiCAN Pro can act as an **SAE J2534-1 (04.04) PassThru interface**:
+The WiCAN PRO can act as an **SAE J2534-1 (04.04) PassThru interface**:
 any Windows J2534 diagnostic or reflash application talks to a vehicle's
 CAN bus **through the WiCAN**, over WiFi or USB. This manual covers
 installing the driver, connecting the WiCAN to your PC, using it from a
@@ -71,20 +71,20 @@ WriteMsgs/ReadMsgs.
 
 ## 2. Requirements
 
-- A WiCAN Pro on firmware v6.
+- A WiCAN PRO on firmware v6.
 - A Windows PC (10/11). Most OEM J2534 apps are **32-bit** and load a
   32-bit driver — the WiCAN DLL is 32-bit; keep that in mind for the
   registry (§5).
 - A way to connect the PC to the WiCAN (WiFi or USB — §4).
-- A vehicle (or an ECU / the bundled ECU simulator) on the WiCAN CAN bus.
+- A vehicle (or an ECU, or an ECU simulator: §9) on the WiCAN CAN bus.
 - Admin rights once, to import the driver registration.
 
 ---
 
 ## 3. Overview of the steps
 
-1. **Firmware:** enable the J2534 server, pick the transport, set the
-   safety gates (§4).
+1. **Firmware:** enable the J2534 server and pick the transport (§4);
+   read §7 before you reflash.
 2. **Connect** the PC to the WiCAN and note the WiCAN's IP address (§4).
 3. **Install** the driver DLL and register it on Windows (§5).
 4. **Use** it from your J2534 application (§6).
@@ -103,8 +103,10 @@ PUT  /api/settings/j2534_server   {"enabled": true, "port": 6809}
 POST /api/settings/submit          (the device reboots)
 ```
 
-Default TCP port is **6809**. Two safety gates (both default **false**)
-are covered in §7 — leave them off for read-only diagnostics.
+Default TCP port is **6809**. Once the server is enabled the WiCAN
+forwards everything the tool sends, reprogramming included; one exposure
+gate (`allow_lan`, default **false**) decides which networks may connect.
+Both are covered in §7.
 
 ### 4b. Choose how the PC reaches the WiCAN
 
@@ -134,8 +136,9 @@ serves DHCP on the link — your PC gets `192.168.82.2`, WiCAN is
 
 ### The easy way — the installer
 
-Run **`wican_j2534_setup_<version>.exe`** (accept the UAC prompt). It
-does everything in this section for you:
+Run **`wican_j2534_setup_<version>.exe`**: accept the UAC prompt, then
+read the disclaimer and accept it (the setup goes no further without
+that). It then does everything in this section for you:
 
 1. Asks **how your PC is connected** to the WiCAN — USB cable in
    network mode (recommended), USB cable in COM-port mode, the WiCAN's
@@ -267,7 +270,7 @@ Any J2534 tool works the same way. Below is the flow using the free
 
 That's the whole loop: **Open → Connect → Flow-Control filter →
 Write/Read**. OEM reflash apps do the same, plus periodic tester-present
-and the reflash services (which need the gate in §7).
+and the reflash services (nothing on the WiCAN holds them back: read §7).
 
 ---
 
@@ -317,15 +320,18 @@ With the recommended **USB-device (NCM)** transport, `allow_lan` can stay
 ## 9. Test without a diagnostic tool
 
 You can exercise the entire path (driver protocol → firmware → a
-simulated ECU) before involving a real tool:
+simulated ECU) before involving a real tool. The scripts are in the WiCAN
+firmware repository (https://github.com/meatpiHQ/wican-fw, branch
+`dev-v6`); from a checkout of it:
 
 ```
-python tools/testbench/j2534_bench.py <wican-ip> 6809 --reflash
+python tools/testbench/usb/j2534_bench.py <wican-ip> 6809 --reflash
 ```
 
 If that passes, a real J2534 app against the same device will too. To
-give the tool something to talk to, run the bundled ECU simulator on the
-CAN bus (e.g. `pcan_reflash_ecu.py`, request `0x7E0` / response `0x7E8`).
+give the tool something to talk to, run that repository's ECU simulator
+on the CAN bus (`tools/testbench/actors/pcan_reflash_ecu.py`, request
+`0x7E0` / response `0x7E8`; it needs a PEAK PCAN-USB adapter on the bus).
 
 ---
 
@@ -392,15 +398,16 @@ since 1.4, so a problem can be shown instead of described:
   `HKLM\SOFTWARE\WiCAN\J2534` (`WOW6432Node` for 32-bit tools) move it,
   `off` disables it. The same lines go to `OutputDebugString` (DebugView)
   always.
-- **Protocols:** CAN, ISO15765. **Baud:** 500000 typical (match the
-  bus).
+- **Protocols:** CAN, ISO15765, J1850 VPW. **Baud:** 500000 typical for
+  CAN (match the bus); J1850 VPW runs at 10.4 kbit/s.
 - **Exports:** the 14 `PassThru*` functions (see `wican_j2534.def`).
 - **Transports:** TCP over WiFi (AP or STA) / USB-Ethernet / USB-device
   NCM, and **USB-device CDC-ACM serial** (a virtual COM port,
-  `device_class=cdc`, auto-discovered by the driver — the classic
+  `device_class=cdc`, auto-discovered by the driver: the classic
   COM-port J2534 device).
-- **Limitations:** CAN/ISO15765 only; no `SetProgrammingVoltage` (returns
-  `ERR_NOT_SUPPORTED`).
+- **Limitations:** CAN, ISO15765 and J1850 VPW only (§1); no
+  `SetProgrammingVoltage` (returns `ERR_NOT_SUPPORTED`).
+- **Source:** https://github.com/meatpiHQ/wican-j2534-driver
 - **Licence:** GNU General Public License, version 3 (`LICENSE.txt` in
   the installation folder). The driver is used at your own risk: see
   "Read this first" at the top of this manual and `DISCLAIMER.txt`.

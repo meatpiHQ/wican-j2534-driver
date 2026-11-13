@@ -75,8 +75,10 @@ Windows Registry Editor Version 5.00
    `"allow_reflash":true` for the reflash legs). The USB-device link counts
    as an allowed interface, so `allow_lan` can stay `false`.
 3. Put an ECU (or the `pcan_reflash_ecu.py` simulator) on WiCAN's CAN bus
-   so there's something to answer. For the sim:
-   `python -u tools/testbench/pcan_reflash_ecu.py 1200 --scenario happy`
+   so there's something to answer. The sim is in the firmware repository
+   (https://github.com/meatpiHQ/wican-fw, branch `dev-v6`) and needs a
+   PEAK PCAN-USB adapter on the bus; from a checkout of it:
+   `python -u tools/testbench/actors/pcan_reflash_ecu.py 1200 --scenario happy`
    (`-u` so its prints flush live). It listens req `0x7E0` → resp `0x7E8`.
 
 ---

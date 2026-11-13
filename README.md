@@ -22,6 +22,12 @@ two transports to the firmware's `j2534_server`:
 > use it. Licence: [GPL-3.0](LICENSE), see
 > [Licence and disclaimer](#licence-and-disclaimer).
 
+**Download:** the built installer (`wican_j2534_setup_<version>.exe`, with
+its SHA-256 and the install steps) is in the WiCAN firmware repository,
+[wican-fw `drivers/j2534`](https://github.com/meatpiHQ/wican-fw/tree/dev-v6/drivers/j2534),
+and is attached to each firmware release. This repository holds the source
+that installer is built from. End users: read [USER_MANUAL.md](USER_MANUAL.md).
+
 ## What it supports
 
 - Protocols **CAN** and **ISO15765** (ISO-TP) on WiCAN's CAN controller
@@ -92,7 +98,7 @@ no CAN-id prefix; the DLL passes it through the same way.
   write is queued, not after the link's round trip, so on a link slower
   than the tool's P2 a request that scraped through with 1.5 (the wait hid
   half the round trip from the timer) times out with 1.6. Bench
-  2026-11-06: udsoncan over the Pi tunnel (46 ms per round trip) failed
+  2026-11-06: udsoncan over a slow routed link (46 ms per round trip) failed
   its 50 ms P2 with the default and passed with `WriteWait`; over the
   WiCAN's own hotspot (5 ms) it passed with the default. Such a link is
   too slow for such a tool either way; `WriteWait` is the knob when a tool
@@ -230,7 +236,7 @@ Typical setups:
   firmware gates the serial session on DTR); set `Transport=serial` in
   the registry (or `WICAN_J2534_COM=auto`) and the port is found by
   VID/PID: no configuration at all. Firmware side bench-tested by
-  `tools/testbench/j2534_serial_test.py`.
+  `tools/testbench/usb/j2534_serial_test.py` of the firmware repository.
 
 On the firmware side, enable the server:
 `/api/settings/j2534_server` → `{"enabled":true,"port":6809}` (reboot).
@@ -241,9 +247,11 @@ services it saw as `reflash_seen`). See `TESTING_DREWTECH.md` §6.
 
 ## Test without a tool
 
-`../testbench/j2534_bench.py <wican-ip> 6809 --reflash` drives the same
-wire protocol end-to-end (a reflash preamble vs a simulated ECU). If that
-passes, the DLL against the same device will too.
+`tools/testbench/usb/j2534_bench.py <wican-ip> 6809 --reflash`, in the
+firmware repository ([wican-fw](https://github.com/meatpiHQ/wican-fw),
+branch `dev-v6`), drives the same wire protocol end-to-end (a reflash
+preamble vs a simulated ECU). If that passes, the DLL against the same
+device will too.
 
 ## Files
 
@@ -259,9 +267,11 @@ passes, the DLL against the same device will too.
 | `LICENSE` | the licence: GNU General Public License, version 3 |
 | `DISCLAIMER.txt` | the disclaimer and terms of use (the installer's accept page) |
 
-> The wire protocol is the contract in the firmware's
-> `components/j2534_server/J2534_WIRE_PROTOCOL.md`. Change one side, change
-> both (and bump `WW_VERSION` when the bytes change).
+> The wire protocol is the contract in the firmware's components
+> repository:
+> [J2534_WIRE_PROTOCOL.md](https://github.com/meatpiHQ/meatpi-components/blob/main/components/j2534_server/J2534_WIRE_PROTOCOL.md).
+> Change one side, change both (and bump `WW_VERSION` when the bytes
+> change).
 
 ## Licence and disclaimer
 

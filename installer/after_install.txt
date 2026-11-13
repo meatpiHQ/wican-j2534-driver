@@ -3,22 +3,25 @@ application's device/interface list will now show "WiCAN".
 
 Before first use, on the WiCAN itself:
 
-  * Enable the J2534 server — it is OFF by default. In the WiCAN web UI
+  * Enable the J2534 server: it is OFF by default. In the WiCAN web UI
     open TOOLS -> J2534, enable it, and submit (the device reboots).
 
-  * Two safety gates stay off by default:
-      - allow_reflash: blocks ECU reprogramming (UDS 0x34-0x37) until
-        you deliberately enable it for a reflash job.
-      - allow_lan: only accepts connections from the WiCAN's own WiFi
-        hotspot or the USB cable, not from a shared LAN.
-    Leave both off for normal read-only diagnostics.
+  * Once the server is enabled, the WiCAN forwards everything your
+    tool sends to the vehicle, ECU reprogramming included. Nothing on
+    the WiCAN blocks a reflash. (Firmware before 2026-10-27 had an
+    "Allow ECU flashing" switch; current firmware has none.) Turn the
+    server off again when no tool should drive the bus.
+
+  * One gate stays off by default, allow_lan: the WiCAN accepts
+    connections only from its own WiFi hotspot or the USB cable, not
+    from a shared LAN. Leave it off unless you need the LAN.
 
 If you chose USB COM-port mode: set the WiCAN's USB role to
 device/cdc (web UI -> USB settings), reboot it, and plug it into this
 PC. The driver finds the WiCAN's COM port automatically.
 
 To change the connection the driver uses (e.g. after switching from USB
-to WiFi), simply re-run this installer — it remembers your current
+to WiFi), simply re-run this installer: it remembers your current
 setting. Power users can override per-session with the WICAN_J2534_HOST,
 WICAN_J2534_PORT and WICAN_J2534_COM environment variables (set
 WICAN_J2534_COM=COM7 or auto to force the serial transport).
