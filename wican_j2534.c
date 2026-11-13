@@ -104,6 +104,7 @@ typedef struct {
     volatile int           ack_ready;
     volatile unsigned long ack_status;
     volatile unsigned long ack_result;
+    volatile int           ack_has_result;
 
     /* 1.6: queued writes. PassThruWriteMsgs with Timeout 0 returns once
      * the request is on the link (SAE J2534-1: "queue and return"); the
@@ -446,6 +447,7 @@ static DWORD WINAPI reader_thread(LPVOID arg)
             unsigned long res = (len>=8) ? get_u32(payload+4) : 0;
             if (seq == g_dev.await_seq && !g_dev.ack_ready) {
                 g_dev.ack_status = st; g_dev.ack_result = res;
+                g_dev.ack_has_result = len >= 8;
                 g_dev.ack_ready = 1; SetEvent(g_dev.ack_ev);
             } else if (st != STATUS_NOERROR && !g_dev.deferred_status) {
                 /* a queued write's ACK (1.6): kept for the next write call */
@@ -533,8 +535,17 @@ static long transact(unsigned char type, unsigned channel,
         set_err("device ACK timeout"); return ERR_TIMEOUT;
     }
 
-    if (result) *result = g_dev.ack_result;
     st = (long)g_dev.ack_status;
+    if (st == STATUS_NOERROR && result != NULL)
+    {
+        if (!g_dev.ack_has_result)
+        {
+            LeaveCriticalSection(&g_dev.req_cs);
+            set_err("WiCAN returned no result; update the device firmware");
+            return ERR_NOT_SUPPORTED;
+        }
+        *result = g_dev.ack_result;
+    }
     LeaveCriticalSection(&g_dev.req_cs);
     if (st != STATUS_NOERROR) set_err(device_status_text(st));   /* 1.5 */
     return st;
@@ -1076,10 +1087,40 @@ J2534_API PassThruIoctl(unsigned long ChannelID, unsigned long IoctlID,
                         const void *pInput, void *pOutput)
 {
     if (!g_open) return ERR_INVALID_DEVICE_ID;
-    if (IoctlID == READ_VBATT) {
-        if (pOutput) *(unsigned long*)pOutput = 12000;
-        log_line("PassThruIoctl: READ_VBATT: 12000 mV (nominal)");
-        return STATUS_NOERROR;
+    if (IoctlID == READ_VBATT)
+    {
+        /* SAE J2534-1 passes the device id here. Tools that pass one of
+         * their channel ids instead were answered by every earlier version,
+         * so an id in the channel range stays accepted: the reading is
+         * device-wide. Anything else is refused. */
+        if (ChannelID < 1 || ChannelID > J2534_MAX_CH)
+        {
+            set_err("READ_VBATT requires the device id returned by PassThruOpen");
+            return ERR_INVALID_DEVICE_ID;
+        }
+        if (pOutput == NULL)
+        {
+            set_err("READ_VBATT requires an output pointer");
+            return ERR_NULL_PARAMETER;
+        }
+        unsigned char p[4];
+        unsigned long millivolts = 0;
+        put_u32(p, READ_VBATT);
+        long st = transact(WW_IOCTL, 0, p, sizeof(p), &millivolts);
+        if (st == STATUS_NOERROR)
+        {
+            *(unsigned long *)pOutput = millivolts;
+            log_line("PassThruIoctl: READ_VBATT: %lu mV", millivolts);
+        }
+        else
+        {
+            if (st == ERR_FAILED)
+            {
+                set_err("WiCAN could not read the battery voltage");
+            }
+            log_line("PassThruIoctl: READ_VBATT: status 0x%lX", (unsigned long)st);
+        }
+        return st;
     }
     if (IoctlID == GET_CONFIG) {
         const SCONFIG_LIST *l = (const SCONFIG_LIST*)pInput;

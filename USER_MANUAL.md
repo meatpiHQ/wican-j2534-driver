@@ -29,6 +29,11 @@ network to the WiCAN firmware, which drives the CAN bus.
   `StartPeriodicMsg / StopPeriodicMsg` (tester-present), `Ioctl`
   (`READ_VBATT`, the `CLEAR_*` buffers), `ReadVersion`, `GetLastError`.
 
+The unreleased voltage update reads the WiCAN's calibrated battery voltage in
+millivolts. It requires matching firmware support; old firmware without a
+voltage result returns `ERR_NOT_SUPPORTED`. Driver 1.6 and earlier return a
+nominal 12.0 V instead, so update both sides for a measured reading.
+
 **Not supported**
 - J1850 PWM, ISO9141 and ISO14230 (KWP2000 over K-line), SCI: these answer
   `ERR_NOT_SUPPORTED` (chip-wired on the hardware, not built yet).
