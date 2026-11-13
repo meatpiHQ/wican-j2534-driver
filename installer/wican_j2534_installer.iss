@@ -10,6 +10,9 @@
 ;      keys again
 ;   5. creates the driver's log folder (Public Documents\WiCAN, 1.4) and a
 ;      Start Menu shortcut to it, plus one to the user manual
+;   6. shows the disclaimer (..\DISCLAIMER.txt, "use at your own risk") on
+;      the wizard's licence page, which the user must accept to go on, and
+;      installs it next to the DLL with the licence (..\LICENSE, GPL-3.0)
 ;
 ; Build with build_installer.ps1 (or:  iscc /DDllPath=<path-to-dll> this-file).
 ; Re-running the installer is the supported way to change Host/Port: it
@@ -37,11 +40,26 @@ OutputBaseFilename=wican_j2534_setup_{#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+; The disclaimer is the wizard's licence page: Next stays disabled until the
+; user accepts it. Plain ASCII text (Inno reads a file with no BOM as ANSI).
+LicenseFile=..\DISCLAIMER.txt
 InfoAfterFile=after_install.txt
 UninstallDisplayName=WiCAN J2534 PassThru Driver
 
+[Messages]
+; The licence page shows the disclaimer, so it says so (the defaults speak
+; of a "License Agreement").
+WizardLicense=Disclaimer: use at your own risk
+LicenseLabel=Please read the following disclaimer and terms of use before continuing.
+LicenseLabel3=This driver can send commands to a vehicle, including commands that reprogram its control units. You must accept the following terms before continuing with the installation.
+LicenseAccepted=I have read the disclaimer and I &accept it
+LicenseNotAccepted=I &do not accept it
+
 [Files]
 Source: "{#DllPath}"; DestDir: "{app}"; Flags: ignoreversion
+; The disclaimer the user accepted above, and the licence (GPL-3.0)
+Source: "..\DISCLAIMER.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 ; Rendered from ..\USER_MANUAL.md by build_installer.ps1 (node + Edge headless)
 Source: "Output\USER_MANUAL.pdf"; DestDir: "{app}"; Flags: ignoreversion
 

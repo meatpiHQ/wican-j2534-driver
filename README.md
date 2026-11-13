@@ -11,6 +11,17 @@ two transports to the firmware's `j2534_server`:
   (`device_class=cdc`, VID 16D0 PID 1263), the Tactrix-style COM-port
   J2534 device. The DLL can auto-discover the port by USB VID/PID.
 
+> **Use at your own risk.** The driver forwards whatever a J2534
+> application sends to the vehicle, ECU reprogramming included, and
+> nothing in between judges whether a message is safe. A failed,
+> interrupted or wrong operation can permanently damage a control unit or
+> leave a vehicle unable to start or drive. The driver comes with **no
+> warranty**, and MeatPi Electronics and the contributors are **not
+> liable** for any damage, loss, cost or injury that results from its
+> use. Read [DISCLAIMER.txt](DISCLAIMER.txt) before you build, install or
+> use it. Licence: [GPL-3.0](LICENSE), see
+> [Licence and disclaimer](#licence-and-disclaimer).
+
 ## What it supports
 
 - Protocols **CAN** and **ISO15765** (ISO-TP) on WiCAN's CAN controller
@@ -150,7 +161,9 @@ Output: `wican_j2534.dll`.
 **End users: use the installer.** `installer\build_installer.ps1` builds
 `wican_j2534_setup_<version>.exe` (Inno Setup 6
 `winget install JRSoftware.InnoSetup`) from a built 32-bit DLL. The
-setup.exe copies the DLL to `Program Files (x86)\WiCAN`, asks which
+setup.exe shows the disclaimer (`DISCLAIMER.txt`) and goes on only when
+the user accepts it, copies the DLL to `Program Files (x86)\WiCAN` with
+the disclaimer and the licence (`LICENSE.txt`), asks which
 transport the user has (USB network / USB COM-port / SoftAP / custom IP),
 registers both registry views, and ships the user manual as a PDF
 (rendered at build time from USER_MANUAL.md via `installer\md2html.mjs`
@@ -228,7 +241,32 @@ passes, the DLL against the same device will too.
 | `wican_j2534.reg` | registry template (PassThruSupport + DLL config) |
 | `CMakeLists.txt` | build |
 | `installer/` | end-user setup.exe (Inno Setup script + build_installer.ps1) |
+| `LICENSE` | the licence: GNU General Public License, version 3 |
+| `DISCLAIMER.txt` | the disclaimer and terms of use (the installer's accept page) |
 
 > The wire protocol is the contract in the firmware's
 > `components/j2534_server/J2534_WIRE_PROTOCOL.md`. Change one side, change
 > both (and bump `WW_VERSION` when the bytes change).
+
+## Licence and disclaimer
+
+Copyright (C) 2026 MeatPi Electronics.
+
+The driver is free software under the **GNU General Public License,
+version 3** (GPL-3.0-only); the full text is in [LICENSE](LICENSE). In
+practice:
+
+- You may use, study, change and redistribute it.
+- If you pass it on, changed or not, as source or as a built DLL or
+  installer, you pass it on under the same licence and with its complete
+  source code. A closed-source version is not allowed.
+- Running the driver is not restricted: any J2534 application may load
+  the DLL and call it.
+
+**Use it at your own risk.** There is no warranty, and MeatPi Electronics
+and the contributors are not liable for damage to a vehicle, a control
+unit or anything else, or for any loss, cost or injury, that results from
+its use. The complete terms are in [DISCLAIMER.txt](DISCLAIMER.txt): the
+installer shows them and installs only when the user accepts them, and
+its warranty and liability sections are additional terms of the licence
+(GPL section 7), so keep the file with every copy you pass on.

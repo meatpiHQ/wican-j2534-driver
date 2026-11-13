@@ -23,4 +23,6 @@ setting. Power users can override per-session with the WICAN_J2534_HOST,
 WICAN_J2534_PORT and WICAN_J2534_COM environment variables (set
 WICAN_J2534_COM=COM7 or auto to force the serial transport).
 
-The full user manual (USER_MANUAL.pdf) is in the installation folder.
+The full user manual (USER_MANUAL.pdf) is in the installation folder,
+with the disclaimer you accepted (DISCLAIMER.txt) and the licence
+(LICENSE.txt, GNU GPL version 3). Use the driver at your own risk.

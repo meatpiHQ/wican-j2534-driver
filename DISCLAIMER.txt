@@ -1,0 +1,161 @@
+WiCAN J2534 PassThru Driver
+DISCLAIMER AND TERMS OF USE
+
+USE AT YOUR OWN RISK.
+
+In short:
+
+  * This driver lets software on your PC send commands to a vehicle,
+    including commands that reprogram (flash) its control units.
+  * A failed, interrupted or wrong operation can permanently damage
+    a control unit, leave the vehicle unable to start or drive, or
+    make it unsafe.
+  * The driver is free, open-source software. It comes with no
+    warranty of any kind.
+  * You alone are responsible for what you do with it. MeatPi
+    Electronics and the contributors are not liable for any damage,
+    loss, cost or injury that results from its use.
+
+By installing or using the driver you confirm that you have read and
+understood this text and that you accept it. If you do not accept
+it, do not install or use the driver.
+
+"The driver" means the WiCAN J2534 PassThru driver software: the DLL
+(wican_j2534.dll), its installer, its source code and its
+documentation.
+
+
+1. WHAT THE DRIVER DOES
+
+The driver is a pass-through. It sends to the vehicle whatever the
+J2534 application you run tells it to send, and hands back what the
+vehicle answers. It does not judge whether a message is safe, and
+neither does the WiCAN: diagnostic requests, actuator tests, coding
+changes and control unit reprogramming all go to the vehicle as the
+application sends them. Do not rely on the driver or on the WiCAN to
+stop a harmful command.
+
+
+2. THE RISKS
+
+Using the driver can, among other things:
+
+  * permanently damage ("brick") a control unit. This is most
+    likely when programming is interrupted or goes wrong: a WiFi or
+    USB link that drops, a PC that sleeps or crashes, a weak
+    vehicle battery, a wrong or corrupt file, or an error in the
+    driver, in the WiCAN firmware or in the application;
+  * leave the vehicle unable to start or drive until a dealer or a
+    specialist repairs it;
+  * erase or corrupt keys, immobiliser data, coding, adaptations or
+    calibration data;
+  * make parts of the vehicle operate without warning, or switch
+    off systems the vehicle needs to be safe;
+  * cause damage to property, injury or death;
+  * void the vehicle's warranty or insurance cover, or make the
+    vehicle illegal to use on the road.
+
+
+3. NOT A CERTIFIED OR APPROVED TOOL
+
+The driver implements part of SAE J2534-1 (version 04.04), not all
+of it. It has not been certified or approved by SAE International,
+by any vehicle manufacturer or by the maker of any diagnostic or
+programming software. It may contain errors, and it may behave
+differently from other J2534 interfaces. It is not guaranteed to
+work, or to work correctly, with any vehicle, control unit or
+application.
+
+Company and product names in the documentation belong to their
+owners. They are used only to describe what the driver has been
+tried with. No affiliation or endorsement is implied.
+
+
+4. YOUR RESPONSIBILITIES
+
+You, and not MeatPi Electronics or the contributors, are responsible
+for:
+
+  * deciding whether the driver is suitable for what you want to do
+    with it;
+  * having the knowledge and skill the work needs, and checking
+    that the application and the files you use are right for the
+    vehicle;
+  * making sure you are allowed to work on the vehicle: that it is
+    yours, or that its owner agreed;
+  * working safely: never on a vehicle that is being driven, and
+    with people kept clear of anything that can move or start;
+  * keeping the power supply and the connection stable during
+    programming: a battery maintainer on the vehicle, the USB cable
+    rather than WiFi where you can, and a PC that will not sleep;
+  * obeying the laws that apply to you, including those on road
+    safety, emissions, vehicle modification and warranty;
+  * keeping the connection to the WiCAN private. The WiCAN's J2534
+    server has no password: anyone who can reach it can send
+    commands to the vehicle;
+  * the driver's log file. The driver records every message it
+    sends and receives in a file on your PC (see the user manual).
+    The file can contain the vehicle identification number and
+    security access data. Check it before you share it.
+
+
+5. NO WARRANTY
+
+THE DRIVER IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE
+LAW. THIS INCLUDES, WITHOUT LIMITATION, ANY WARRANTY OF
+MERCHANTABILITY, OF FITNESS FOR A PARTICULAR PURPOSE, OF
+NON-INFRINGEMENT AND OF ACCURACY, AND ANY WARRANTY THAT THE DRIVER
+IS FREE OF ERRORS OR WILL WORK WITHOUT INTERRUPTION. THE ENTIRE RISK
+AS TO THE QUALITY AND PERFORMANCE OF THE DRIVER IS WITH YOU. IF THE
+DRIVER PROVES DEFECTIVE, YOU BEAR THE COST OF ALL NECESSARY
+SERVICING, REPAIR OR CORRECTION, INCLUDING THAT OF ANY VEHICLE OR
+EQUIPMENT.
+
+
+6. LIMITATION OF LIABILITY
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, MEATPI
+ELECTRONICS, THE AUTHORS OF THE DRIVER, ITS CONTRIBUTORS AND ANYONE
+WHO DISTRIBUTES IT ARE NOT LIABLE TO YOU OR TO ANYONE ELSE FOR ANY
+DAMAGE, LOSS, COST OR INJURY THAT ARISES FROM INSTALLING OR USING
+THE DRIVER OR FROM BEING UNABLE TO USE IT. THIS APPLIES TO DIRECT,
+INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL AND ANY OTHER DAMAGES,
+UNDER ANY LEGAL THEORY (CONTRACT, NEGLIGENCE OR ANY OTHER), EVEN IF
+THEY HAVE BEEN ADVISED THAT SUCH DAMAGE IS POSSIBLE. IT INCLUDES,
+WITHOUT LIMITATION:
+
+  * DAMAGE TO, OR LOSS OF, A VEHICLE, A CONTROL UNIT OR ANY OTHER
+    EQUIPMENT OR PROPERTY;
+  * THE COST OF REPAIR, REPLACEMENT, REPROGRAMMING, TOWING OR
+    RECOVERY, AND DEALER OR WORKSHOP CHARGES;
+  * LOSS OF USE, OF DATA, OF INCOME OR OF PROFIT;
+  * FINES, PENALTIES, AND LOSS OF WARRANTY OR INSURANCE COVER;
+  * PERSONAL INJURY OR DEATH.
+
+YOU USE THE DRIVER ENTIRELY AT YOUR OWN RISK.
+
+
+7. RIGHTS THE LAW GIVES YOU
+
+Some laws, consumer laws among them, give you rights that cannot be
+excluded or limited. Nothing in this text takes those rights away.
+Where the law does not allow a liability to be excluded but allows
+it to be limited, it is limited as far as the law allows.
+
+
+8. LICENCE
+
+The driver is free software. You may use, study, change and
+redistribute it under the GNU General Public License, version 3
+(GPL-3.0-only). The full licence is in the file LICENSE (LICENSE.txt
+in the installation folder), and the source code is at
+https://github.com/meatpiHQ/wican-j2534-driver
+
+Sections 5 and 6 above are additional terms under section 7(a) of
+that licence. This text is a legal notice under section 7(b) of that
+licence: keep it with every copy of the driver, and of any modified
+version, that you pass on. Nothing in this text takes away a right
+the licence gives you.
+
+Copyright (C) 2026 MeatPi Electronics

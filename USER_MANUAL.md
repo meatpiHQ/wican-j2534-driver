@@ -6,6 +6,28 @@ CAN bus **through the WiCAN**, over WiFi or USB. This manual covers
 installing the driver, connecting the WiCAN to your PC, using it from a
 diagnostic tool, the safety gates, and troubleshooting.
 
+## Read this first: use at your own risk
+
+> **Warning.** The driver forwards everything your J2534 application
+> sends to the vehicle, ECU reprogramming included, and nothing in
+> between judges whether a message is safe. A failed, interrupted or
+> wrong operation can permanently damage a control unit, leave the
+> vehicle unable to start or drive, or make it unsafe.
+
+- The driver is free, open-source software (GNU GPL version 3) and comes
+  with **no warranty**. It is not certified or approved by SAE, by any
+  vehicle manufacturer or by any tool vendor.
+- **You are responsible** for what you do with it. MeatPi Electronics and
+  the contributors are **not liable** for any damage, loss, cost or
+  injury that results from its use.
+- When you program a control unit: use the USB cable rather than WiFi,
+  keep a battery maintainer on the vehicle, stop the PC from sleeping,
+  and never work on a vehicle that is being driven.
+
+The complete terms are the disclaimer the installer asked you to accept:
+`DISCLAIMER.txt` in the installation folder
+(`C:\Program Files (x86)\WiCAN\`), next to the licence (`LICENSE.txt`).
+
 ---
 
 ## 1. What it is and what it supports
@@ -378,6 +400,9 @@ since 1.4, so a problem can be shown instead of described:
   COM-port J2534 device).
 - **Limitations:** CAN/ISO15765 only; no `SetProgrammingVoltage` (returns
   `ERR_NOT_SUPPORTED`).
+- **Licence:** GNU General Public License, version 3 (`LICENSE.txt` in
+  the installation folder). The driver is used at your own risk: see
+  "Read this first" at the top of this manual and `DISCLAIMER.txt`.
 
 ---
 

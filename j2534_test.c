@@ -1,4 +1,15 @@
 /*
+ * SPDX-License-Identifier: GPL-3.0-only
+ * Copyright (C) 2026 MeatPi Electronics
+ *
+ * This file is part of the WiCAN J2534 PassThru driver, free software
+ * under the GNU General Public License, version 3: see LICENSE.
+ * It comes with NO WARRANTY and is used AT YOUR OWN RISK. The warranty
+ * and liability terms in DISCLAIMER.txt are part of the licence
+ * (additional terms, GPL section 7).
+ */
+
+/*
  * j2534_test.c — a minimal J2534 conformance/pass-through test for the
  * WiCAN DLL. Loads wican_j2534.dll like a real PassThru app (LoadLibrary
  * + GetProcAddress), opens an ISO15765 channel, sets the flow-control
