@@ -117,12 +117,12 @@ typedef struct {
     volatile unsigned long ack_result;
     volatile int           ack_has_result;
 
-    /* 1.6: queued writes. PassThruWriteMsgs with Timeout 0 returns once
-     * the request is on the link (SAE J2534-1: "queue and return"); the
-     * device's ACK comes in behind it on the reader thread, and a refusal
-     * is kept for the next PassThruWriteMsgs call. write_wait = every
-     * write waits for its ACK (the 1.5 behaviour; registry WriteWait or
-     * env WICAN_J2534_WRITE_WAIT = 1). */
+    /* 1.6: queued writes. Timeout 0, and a raw CAN frame at any Timeout,
+     * return once the request is on the link (SAE J2534-1: "queue and
+     * return"); the device's ACK comes in behind it on the reader thread,
+     * and a refusal is kept for the next PassThruWriteMsgs call.
+     * write_wait = every write waits for its ACK (the 1.5 behaviour;
+     * registry WriteWait or env WICAN_J2534_WRITE_WAIT = 1). */
     int                    write_wait;
     volatile unsigned long deferred_status;   /* 0 = none pending */
     volatile unsigned      deferred_seq;
@@ -897,6 +897,14 @@ J2534_API PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
     unsigned long want = *pNumMsgs, got = 0;
     rx_ring_t *r = &g_dev.ring[ChannelID-1];
     DWORD deadline = GetTickCount() + Timeout;
+    /* Once any frame is in hand, a few quiet milliseconds means the burst
+     * stopped. MED9 asks for a whole TP2.0 block in one call (up to 20 ms).
+     * The ECU sends the block-end and then waits for the tester's ACK, so
+     * filling that request holds the block-end until the timeout. Bench
+     * 2026-11-15: 940 of those waits, median 34 ms, 343 of them about 60 ms,
+     * 35 s of a 66 s read. Frames on this bus are about 2 ms apart, so 4 ms
+     * of silence is the end of the burst, not a gap inside it. An empty
+     * read still waits out Timeout. */
     while (got < want) {
         if (ring_pop(r, &pMsg[got])) { got++; continue; }
         if (Timeout == 0 || !g_dev.connected) break;
@@ -906,8 +914,15 @@ J2534_API PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
          * poll. Sleep(1) is the Windows timer period (15.6 ms unless some
          * app raised it), so every frame a tool waited for cost up to a
          * timer tick; bench 2026-10-27: 19 ms per TP 2.0 block-end ACK. */
-        if (r->ev) WaitForSingleObject(r->ev, (DWORD)left);
-        else Sleep(1);   /* no event (CreateEvent failed at open): the old poll */
+        DWORD slice = (DWORD)left;
+        if (got > 0 && slice > 4) slice = 4;
+        if (r->ev) {
+            DWORD w = WaitForSingleObject(r->ev, slice);
+            if (got > 0 && w == WAIT_TIMEOUT) break;
+        } else {
+            Sleep(1);   /* no event (CreateEvent failed at open): the old poll */
+            if (got > 0) break;
+        }
     }
     *pNumMsgs = got;
     if (got) {
@@ -933,7 +948,17 @@ J2534_API PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
  * with Timeout 0 the call returns once the request is on the link, as
  * SAE J2534-1 says ("queue and return"); the device's answer comes in on
  * the reader thread, and a refusal is reported by the NEXT call, which
- * then sends nothing. A non-zero Timeout, or WriteWait, waits as 1.5 did. */
+ * then sends nothing. WriteWait, ISO15765, and J1850 still wait.
+ *
+ * CAN frames (MED9, 2026-11-15): that tool passes Timeout 20 on every raw
+ * CAN frame, so the wait above never let the join window run. The driver
+ * log of a 64 KiB read shows about 9 ms from the previous call to each
+ * write's return, a couple of thousand times (74 s on WiCAN, 40 s on
+ * OpenPort). A raw CAN frame is the 4-byte id plus at most 8 data bytes.
+ * Those are handed to the link before the call returns, and the call does
+ * not wait for the device's ACK. The tool can drain frames it already
+ * pulled before it reads again, so the frame cannot stay in the join
+ * window until that next read. */
 J2534_API PassThruWriteMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
                             unsigned long *pNumMsgs, unsigned long Timeout)
 {
@@ -942,7 +967,14 @@ J2534_API PassThruWriteMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
     static unsigned char buf[WW_REQ_CAP];
     unsigned long want = *pNumMsgs, sent = 0;
     char hx[3 * WW_MAX_DATA + 8];
-    int wait = g_dev.write_wait || Timeout != 0;
+    int raw_can = want > 0;
+    for (unsigned long i = 0; i < want; i++) {
+        const PASSTHRU_MSG *m = &pMsg[i];
+        if (m->ProtocolID != CAN || m->DataSize < 4 || m->DataSize > 12)
+            raw_can = 0;
+    }
+    (void)Timeout;
+    int wait = g_dev.write_wait || !raw_can;
 
     if (g_dev.deferred_status) {
         long st = (long)g_dev.deferred_status;
@@ -977,7 +1009,14 @@ J2534_API PassThruWriteMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
                      ChannelID, m->ProtocolID, m->TxFlags, m->DataSize, hex_all(m->Data, m->DataSize, hx));
             sent++;
         }
-        if (!g_dev.flusher) flush_pending();   /* no join-window thread: out now */
+        /* A raw CAN frame has to leave before this call returns. The MED9
+         * tool often still holds frames from the last read, and it will
+         * not call PassThruReadMsgs (which flushes) until that queue is
+         * empty. Timeout 0 for any other protocol keeps the join window. */
+        if (raw_can || !g_dev.flusher) {
+            long st = flush_pending();
+            if (st != STATUS_NOERROR) { *pNumMsgs = 0; return st; }
+        }
         *pNumMsgs = sent;
         return STATUS_NOERROR;
     }
