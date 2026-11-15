@@ -1082,14 +1082,14 @@ J2534_API PassThruStopPeriodicMsg(unsigned long ChannelID, unsigned long MsgID)
 }
 
 /* GET_CONFIG: the values this device runs with (its ISO-TP flow control
- * is BS 8 / STmin 1 ms, bus timing comes from the device settings) */
+ * is BS 0 / STmin 0, bus timing comes from the device settings) */
 static unsigned long config_value(unsigned long channel, unsigned long param)
 {
     switch (param) {
         case DATA_RATE:      return (channel >= 1 && channel <= J2534_MAX_CH) ? g_dev.ch_baud[channel-1] : 0;
         case LOOPBACK:       return 0;
-        case ISO15765_BS:    return 8;
-        case ISO15765_STMIN: return 1;
+        case ISO15765_BS:    return 0;
+        case ISO15765_STMIN: return 0;
         default:             return 0;
     }
 }
