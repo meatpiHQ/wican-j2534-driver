@@ -116,6 +116,10 @@ typedef struct {
     volatile unsigned long ack_status;
     volatile unsigned long ack_result;
     volatile int           ack_has_result;
+    /* bytes after the ACK status word. GET_CONFIG's pairs live here.
+     * Written by the reader before ack_ready, read by transact after it. */
+    unsigned char          ack_body[1024];
+    volatile unsigned      ack_body_len;
 
     /* 1.6: queued writes. Timeout 0, and a raw CAN frame at any Timeout,
      * return once the request is on the link (SAE J2534-1: "queue and
@@ -457,6 +461,10 @@ static DWORD WINAPI reader_thread(LPVOID arg)
             unsigned long st  = (len>=4) ? get_u32(payload) : ERR_FAILED;
             unsigned long res = (len>=8) ? get_u32(payload+4) : 0;
             if (seq == g_dev.await_seq && !g_dev.ack_ready) {
+                unsigned extra = (len > 4) ? (unsigned)(len - 4) : 0;
+                if (extra > sizeof(g_dev.ack_body)) extra = (unsigned)sizeof(g_dev.ack_body);
+                if (extra) memcpy(g_dev.ack_body, payload + 4, extra);
+                g_dev.ack_body_len = extra;
                 g_dev.ack_status = st; g_dev.ack_result = res;
                 g_dev.ack_has_result = len >= 8;
                 g_dev.ack_ready = 1; SetEvent(g_dev.ack_ev);
@@ -491,6 +499,7 @@ static const char *device_status_text(long st)
     case 0x02: return "the WiCAN refused: ERR_INVALID_CHANNEL_ID (0x02): no such channel (disconnected, or the session was reset)";
     case 0x03: return "the WiCAN refused: ERR_INVALID_PROTOCOL_ID (0x03)";
     case 0x04: return "the WiCAN refused: ERR_NULL_PARAMETER (0x04)";
+    case 0x05: return "the WiCAN refused: ERR_INVALID_IOCTL_VALUE (0x05): the ioctl value was rejected";
     case 0x06: return "the WiCAN refused: ERR_INVALID_FLAGS (0x06)";
     case 0x07: return "the WiCAN refused: ERR_FAILED (0x07): the CAN node is not transmitting (no bit rate proven on a silent bus with Automatic, a mismatch, listen-only: check /api/can), an ISO-TP send failed, or no free channel / periodic slot";
     case 0x08: return "the WiCAN refused: ERR_DEVICE_NOT_CONNECTED (0x08): CONNECT before OPEN";
@@ -500,8 +509,10 @@ static const char *device_status_text(long st)
     case 0x14: return "the WiCAN refused: ERR_MSG_PROTOCOL_ID (0x14): the message's protocol does not match the channel";
     case 0x15: return "the WiCAN refused: ERR_INVALID_FILTER_ID (0x15)";
     case 0x16: return "the WiCAN refused: ERR_NO_FLOW_CONTROL (0x16): a multi-frame ISO15765 message to an id with no FLOW_CONTROL filter";
+    case 0x17: return "the WiCAN refused: ERR_NOT_UNIQUE (0x17): that id is already in use";
     case 0x18: return "the WiCAN refused: ERR_INVALID_BAUDRATE (0x18): the CAN bus runs at another bit rate (the WiCAN's setting, or what it read off the wire)";
     case 0x1A: return "the WiCAN refused: ERR_DEVICE_IN_USE (0x1A): another tester is attached (TCP, USB serial or BLE)";
+    case 0x1D: return "the WiCAN refused: ERR_NO_CONNECTION_ESTABLISHED (0x1D): no TP2.0 connection for that id";
     default:   return "the WiCAN refused the request (the status code is in the driver log)";
     }
 }
@@ -855,11 +866,12 @@ J2534_API PassThruConnect(unsigned long DeviceID, unsigned long ProtocolID,
     (void)DeviceID;
     if (!g_open) return ERR_INVALID_DEVICE_ID;
     /* CAN + ISO15765 on the native controller; J1850 VPW (GM Class 2) on
-     * the device's OBD chip. For J1850 the app puts the whole message
+     * the device's OBD chip; TP2.0 (0x800E) is forwarded and the device
+     * runs the state machine. For J1850 the app puts the whole message
      * ([3-byte header][payload]) in PASSTHRU_MSG.Data with no CAN-id
      * prefix, and the DLL passes it through verbatim like every message. */
     if (ProtocolID != CAN && ProtocolID != ISO15765 &&
-        ProtocolID != J1850VPW) {
+        ProtocolID != J1850VPW && ProtocolID != TP2_0_PS) {
         log_line("PassThruConnect: protocol %lu: ERR_INVALID_PROTOCOL_ID", ProtocolID);
         return ERR_INVALID_PROTOCOL_ID;
     }
@@ -897,16 +909,20 @@ J2534_API PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
     unsigned long want = *pNumMsgs, got = 0;
     rx_ring_t *r = &g_dev.ring[ChannelID-1];
     DWORD deadline = GetTickCount() + Timeout;
-    /* Once any frame is in hand, a few quiet milliseconds means the burst
-     * stopped. MED9 asks for a whole TP2.0 block in one call (up to 20 ms).
-     * The ECU sends the block-end and then waits for the tester's ACK, so
-     * filling that request holds the block-end until the timeout. Bench
-     * 2026-11-15: 940 of those waits, median 34 ms, 343 of them about 60 ms,
-     * 35 s of a 66 s read. Frames on this bus are about 2 ms apart, so 4 ms
-     * of silence is the end of the burst, not a gap inside it. An empty
-     * read still waits out Timeout. */
+    /* Raw CAN: once any frame is in hand, a few quiet milliseconds means
+     * the burst stopped. MED9 asks for a whole TP2.0 block in one call
+     * (up to 20 ms). The ECU sends the block-end and then waits for the
+     * tester's ACK, so filling that request holds the block-end until the
+     * timeout. Bench 2026-11-15: 940 of those waits, median 34 ms, 343 of
+     * them about 60 ms, 35 s of a 66 s read. Frames on this bus are about
+     * 2 ms apart, so 4 ms of silence is the end of the burst, not a gap
+     * inside it. An empty read still waits out Timeout.
+     * TP2_0_PS is different: the device already reassembled the message,
+     * so a read returns what is queued and does not sit on it. */
+    int coalesce = g_dev.ch_proto[ChannelID - 1] != TP2_0_PS;
     while (got < want) {
         if (ring_pop(r, &pMsg[got])) { got++; continue; }
+        if (!coalesce && got > 0) break;
         if (Timeout == 0 || !g_dev.connected) break;
         long left = (long)(deadline - GetTickCount());
         if (left <= 0) break;
@@ -915,10 +931,10 @@ J2534_API PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
          * app raised it), so every frame a tool waited for cost up to a
          * timer tick; bench 2026-10-27: 19 ms per TP 2.0 block-end ACK. */
         DWORD slice = (DWORD)left;
-        if (got > 0 && slice > 4) slice = 4;
+        if (coalesce && got > 0 && slice > 4) slice = 4;
         if (r->ev) {
             DWORD w = WaitForSingleObject(r->ev, slice);
-            if (got > 0 && w == WAIT_TIMEOUT) break;
+            if (coalesce && got > 0 && w == WAIT_TIMEOUT) break;
         } else {
             Sleep(1);   /* no event (CreateEvent failed at open): the old poll */
             if (got > 0) break;
@@ -1133,6 +1149,121 @@ static unsigned long config_value(unsigned long channel, unsigned long param)
     }
 }
 
+#define IOCTL_CFG_MAX 64
+
+static int channel_is_tp20(unsigned long channel)
+{
+    return channel >= 1 && channel <= J2534_MAX_CH
+        && g_dev.ch_open[channel - 1]
+        && g_dev.ch_proto[channel - 1] == TP2_0_PS;
+}
+
+/* WW_IOCTL payload: u32 ioctl_id, u32 body_len, body[body_len].
+ * The DLL does not interpret a TP2.0 telegram; the device does. */
+static long ioctl_send(unsigned channel, unsigned long ioctl_id,
+                       const unsigned char *body, unsigned body_len,
+                       unsigned long *result)
+{
+    unsigned char buf[8 + 4 + IOCTL_CFG_MAX * 8];
+    if (body_len > sizeof(buf) - 8) {
+        set_err("ioctl body too long");
+        return ERR_INVALID_MSG;
+    }
+    put_u32(buf, ioctl_id);
+    put_u32(buf + 4, body_len);
+    if (body_len && body) memcpy(buf + 8, body, body_len);
+    return transact(WW_IOCTL, channel, buf, 8 + body_len, result);
+}
+
+/* SET_CONFIG / GET_CONFIG body: u32 count, then count pairs. GET_CONFIG's
+ * ACK is the status word, then the same count and the pairs with values. */
+static long ioctl_config(unsigned long channel, unsigned long ioctl_id,
+                         const SCONFIG_LIST *l)
+{
+    unsigned long count = l->NumOfParams;
+    unsigned char body[4 + IOCTL_CFG_MAX * 8];
+    long st;
+    if (count > IOCTL_CFG_MAX) {
+        set_err("too many config parameters");
+        return ERR_INVALID_MSG;
+    }
+    put_u32(body, count);
+    for (unsigned long i = 0; i < count; i++) {
+        put_u32(body + 4 + i * 8, l->ConfigPtr[i].Parameter);
+        put_u32(body + 8 + i * 8, l->ConfigPtr[i].Value);
+        if (ioctl_id == SET_CONFIG)
+            log_line("PassThruIoctl: SET_CONFIG channel %lu param 0x%lX = %lu",
+                     channel, l->ConfigPtr[i].Parameter, l->ConfigPtr[i].Value);
+    }
+    st = ioctl_send((unsigned)channel, ioctl_id, body,
+                    4u + (unsigned)count * 8u, NULL);
+    if (st != STATUS_NOERROR || ioctl_id != GET_CONFIG) {
+        log_line("PassThruIoctl: channel %lu ioctl 0x%lX: status 0x%lX",
+                 channel, ioctl_id, (unsigned long)st);
+        return st;
+    }
+    if (count == 0) return STATUS_NOERROR;
+    {
+        unsigned n = g_dev.ack_body_len;
+        const unsigned char *b = g_dev.ack_body;
+        unsigned off = 4;
+        unsigned filled = 0;
+        unsigned long got;
+        if (n < 4) {
+            set_err("WiCAN returned no result; update the device firmware");
+            log_line("PassThruIoctl: GET_CONFIG channel %lu: no pairs in the ACK", channel);
+            return ERR_NOT_SUPPORTED;
+        }
+        got = get_u32(b);
+        for (unsigned long i = 0; i < got; i++) {
+            unsigned long param, value;
+            if (off + 8 > n) break;
+            param = get_u32(b + off);
+            value = get_u32(b + off + 4);
+            off += 8;
+            for (unsigned long j = 0; j < count; j++) {
+                if (l->ConfigPtr[j].Parameter != param) continue;
+                l->ConfigPtr[j].Value = value;
+                filled++;
+                log_line("PassThruIoctl: GET_CONFIG channel %lu param 0x%lX = %lu",
+                         channel, param, value);
+            }
+        }
+        if (!filled) {
+            set_err("WiCAN returned no result; update the device firmware");
+            log_line("PassThruIoctl: GET_CONFIG channel %lu: ACK count %lu matched nothing",
+                     channel, got);
+            return ERR_NOT_SUPPORTED;
+        }
+    }
+    return STATUS_NOERROR;
+}
+
+/* REQUEST_CONNECTION body is the caller's bytes (11 for a setup).
+ * TEARDOWN_CONNECTION body is the 4-byte RX id. A wrong length is the
+ * device's ERR_INVALID_IOCTL_VALUE; this DLL forwards the buffer. */
+static long ioctl_bytes(unsigned long channel, unsigned long ioctl_id,
+                        const SBYTE_ARRAY *a)
+{
+    unsigned char body[256];
+    unsigned n;
+    long st;
+    if (!a || (a->NumOfBytes && !a->BytePtr)) {
+        set_err("ioctl requires an input buffer");
+        return ERR_NULL_PARAMETER;
+    }
+    n = (unsigned)a->NumOfBytes;
+    if (n > sizeof(body)) {
+        set_err("ioctl body too long");
+        return ERR_INVALID_MSG;
+    }
+    if (n) memcpy(body, a->BytePtr, n);
+    st = ioctl_send((unsigned)channel, ioctl_id, body, n, NULL);
+    log_line("PassThruIoctl: channel %lu ioctl 0x%lX body %u: status 0x%lX",
+             channel, ioctl_id, n, (unsigned long)st);
+    return st;
+}
+
 J2534_API PassThruIoctl(unsigned long ChannelID, unsigned long IoctlID,
                         const void *pInput, void *pOutput)
 {
@@ -1153,28 +1284,57 @@ J2534_API PassThruIoctl(unsigned long ChannelID, unsigned long IoctlID,
             set_err("READ_VBATT requires an output pointer");
             return ERR_NULL_PARAMETER;
         }
-        unsigned char p[4];
-        unsigned long millivolts = 0;
-        put_u32(p, READ_VBATT);
-        long st = transact(WW_IOCTL, 0, p, sizeof(p), &millivolts);
-        if (st == STATUS_NOERROR)
         {
-            *(unsigned long *)pOutput = millivolts;
-            log_line("PassThruIoctl: READ_VBATT: %lu mV", millivolts);
-        }
-        else
-        {
-            if (st == ERR_FAILED)
+            unsigned long millivolts = 0;
+            long st = ioctl_send(0, READ_VBATT, NULL, 0, &millivolts);
+            if (st == STATUS_NOERROR)
             {
-                set_err("WiCAN could not read the battery voltage");
+                *(unsigned long *)pOutput = millivolts;
+                log_line("PassThruIoctl: READ_VBATT: %lu mV", millivolts);
             }
-            log_line("PassThruIoctl: READ_VBATT: status 0x%lX", (unsigned long)st);
+            else
+            {
+                if (st == ERR_FAILED)
+                    set_err("WiCAN could not read the battery voltage");
+                log_line("PassThruIoctl: READ_VBATT: status 0x%lX", (unsigned long)st);
+            }
+            return st;
+        }
+    }
+    if (IoctlID == GET_DEVICE_INFO)
+    {
+        /* Same acceptance rule as READ_VBATT: the device id, and the
+         * answer is one trailing u32 on the ACK. */
+        unsigned long value = 0;
+        unsigned char body[4];
+        long st;
+        if (ChannelID < 1 || ChannelID > J2534_MAX_CH)
+        {
+            set_err("GET_DEVICE_INFO requires the device id returned by PassThruOpen");
+            return ERR_INVALID_DEVICE_ID;
+        }
+        if (!pInput || !pOutput)
+        {
+            set_err("GET_DEVICE_INFO requires the parameter and an output pointer");
+            return ERR_NULL_PARAMETER;
+        }
+        put_u32(body, *(const unsigned long *)pInput);
+        st = ioctl_send(0, GET_DEVICE_INFO, body, 4, &value);
+        if (st == STATUS_NOERROR) {
+            *(unsigned long *)pOutput = value;
+            log_line("PassThruIoctl: GET_DEVICE_INFO param 0x%lX = %lu",
+                     *(const unsigned long *)pInput, value);
+        } else {
+            log_line("PassThruIoctl: GET_DEVICE_INFO param 0x%lX: status 0x%lX",
+                     *(const unsigned long *)pInput, (unsigned long)st);
         }
         return st;
     }
     if (IoctlID == GET_CONFIG) {
         const SCONFIG_LIST *l = (const SCONFIG_LIST*)pInput;
         if (!l || (l->NumOfParams && !l->ConfigPtr)) return ERR_NULL_PARAMETER;
+        if (channel_is_tp20(ChannelID))
+            return ioctl_config(ChannelID, GET_CONFIG, l);
         for (unsigned long i = 0; i < l->NumOfParams; i++) {
             l->ConfigPtr[i].Value = config_value(ChannelID, l->ConfigPtr[i].Parameter);
             log_line("PassThruIoctl: GET_CONFIG channel %lu param 0x%lX = %lu",
@@ -1182,16 +1342,26 @@ J2534_API PassThruIoctl(unsigned long ChannelID, unsigned long IoctlID,
         }
         return STATUS_NOERROR;
     }
+    if (IoctlID == SET_CONFIG && channel_is_tp20(ChannelID)) {
+        const SCONFIG_LIST *l = (const SCONFIG_LIST*)pInput;
+        if (!l || (l->NumOfParams && !l->ConfigPtr)) return ERR_NULL_PARAMETER;
+        return ioctl_config(ChannelID, SET_CONFIG, l);
+    }
     if (IoctlID == SET_CONFIG && pInput) {
         const SCONFIG_LIST *l = (const SCONFIG_LIST*)pInput;
         for (unsigned long i = 0; l->ConfigPtr && i < l->NumOfParams; i++)
             log_line("PassThruIoctl: SET_CONFIG channel %lu param 0x%lX = %lu (device keeps its own bus timing)",
                      ChannelID, l->ConfigPtr[i].Parameter, l->ConfigPtr[i].Value);
     }
-    unsigned char p[4]; put_u32(p, IoctlID);
-    long st = transact(WW_IOCTL, (unsigned)ChannelID, p, 4, NULL);
-    log_line("PassThruIoctl: channel %lu ioctl 0x%lX: status 0x%lX", ChannelID, IoctlID, (unsigned long)st);
-    return st;
+    if (IoctlID == REQUEST_CONNECTION || IoctlID == TEARDOWN_CONNECTION) {
+        if (ChannelID < 1 || ChannelID > J2534_MAX_CH) return ERR_INVALID_CHANNEL_ID;
+        return ioctl_bytes(ChannelID, IoctlID, (const SBYTE_ARRAY *)pInput);
+    }
+    {
+        long st = ioctl_send((unsigned)ChannelID, IoctlID, NULL, 0, NULL);
+        log_line("PassThruIoctl: channel %lu ioctl 0x%lX: status 0x%lX", ChannelID, IoctlID, (unsigned long)st);
+        return st;
+    }
 }
 
 J2534_API PassThruSetProgrammingVoltage(unsigned long DeviceID,

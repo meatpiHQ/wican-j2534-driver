@@ -37,11 +37,12 @@ typedef long (__stdcall *fDisc)(unsigned long);
 typedef long (__stdcall *fRead)(unsigned long, PASSTHRU_MSG*, unsigned long*, unsigned long);
 typedef long (__stdcall *fWrite)(unsigned long, PASSTHRU_MSG*, unsigned long*, unsigned long);
 typedef long (__stdcall *fFilter)(unsigned long, unsigned long, const PASSTHRU_MSG*, const PASSTHRU_MSG*, const PASSTHRU_MSG*, unsigned long*);
+typedef long (__stdcall *fIoctl)(unsigned long, unsigned long, const void*, void*);
 typedef long (__stdcall *fErr)(char*);
 
 static fOpen Open; static fClose Close; static fConnect Connect;
 static fDisc Disconnect; static fRead ReadMsgs; static fWrite WriteMsgs;
-static fFilter StartMsgFilter; static fErr GetLastError_;
+static fFilter StartMsgFilter; static fIoctl Ioctl; static fErr GetLastError_;
 
 static int fails = 0;
 static void check(const char *name, int ok, const char *detail)
@@ -95,8 +96,9 @@ int main(void)
     ReadMsgs=(fRead)GetProcAddress(dll,"PassThruReadMsgs");
     WriteMsgs=(fWrite)GetProcAddress(dll,"PassThruWriteMsgs");
     StartMsgFilter=(fFilter)GetProcAddress(dll,"PassThruStartMsgFilter");
+    Ioctl=(fIoctl)GetProcAddress(dll,"PassThruIoctl");
     GetLastError_=(fErr)GetProcAddress(dll,"PassThruGetLastError");
-    if (!Open||!Connect||!WriteMsgs||!ReadMsgs||!StartMsgFilter) {
+    if (!Open||!Connect||!WriteMsgs||!ReadMsgs||!StartMsgFilter||!Ioctl) {
         printf("J2534 DRIVER TEST FAIL: missing exports\n"); return 1; }
 
     unsigned long dev = 0;
@@ -108,6 +110,24 @@ int main(void)
     unsigned long ch = 0;
     st = Connect(dev, ISO15765, 0, 500000, &ch);
     check("PassThruConnect ISO15765", st == STATUS_NOERROR, "");
+
+    /* TP2.0 is its own channel. A rejected setup length is the firmware's
+     * job (ERR_INVALID_IOCTL_VALUE); this test does not check that. */
+    {
+        unsigned long tp = 0;
+        char detail[64];
+        st = Connect(dev, TP2_0_PS, 0, 500000, &tp);
+        sprintf(detail, "status 0x%lX", (unsigned long)st);
+        check("PassThruConnect TP2_0_PS", st == STATUS_NOERROR, detail);
+        if (st == STATUS_NOERROR) {
+            unsigned long param = TP2_0_SUPPORTED, value = 0;
+            long ist = Ioctl(dev, GET_DEVICE_INFO, &param, &value);
+            sprintf(detail, "status 0x%lX value %lu", (unsigned long)ist, value);
+            check("GET_DEVICE_INFO TP2_0_SUPPORTED",
+                  ist == STATUS_NOERROR && value == 1, detail);
+            if (Disconnect) Disconnect(tp);
+        }
+    }
 
     /* flow-control filter: rx pattern 0x7E8, flow-control (tx) 0x7E0 */
     PASSTHRU_MSG mask, patt, flow; unsigned long fid = 0;

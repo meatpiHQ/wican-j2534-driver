@@ -46,6 +46,15 @@
 /* 12-byte header, little-endian: magic u16, ver u8, type u8, seq u16,
  * channel u16, length u32. PASSTHRU_MSG on the wire: protocol u32,
  * rx_status u32, tx_flags u32, timestamp u32, extra_data_index u32,
- * data_size u32, data[data_size]. */
+ * data_size u32, data[data_size].
+ *
+ * WW_IOCTL payload: u32 ioctl_id, u32 body_len, body[body_len].
+ *   SET_CONFIG / GET_CONFIG body: u32 count, then count pairs of
+ *     u32 parameter, u32 value. GET_CONFIG's ACK is the status word,
+ *     then that same count and the pairs with values filled.
+ *   REQUEST_CONNECTION body_len is 11 and the body is those 11 bytes.
+ *   TEARDOWN_CONNECTION body_len is 4 and the body is the RX id.
+ *   GET_DEVICE_INFO body is one u32 parameter. Its ACK, like READ_VBATT,
+ *     is the status word plus one u32. */
 
 #endif /* WICAN_WIRE_H */

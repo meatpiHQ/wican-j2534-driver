@@ -14,6 +14,7 @@ Windows Registry Editor Version 5.00
 "FunctionLibrary"="C:\\Program Files\\WiCAN\\wican_j2534.dll"
 "CAN"=dword:00000001
 "ISO15765"=dword:00000001
+"TP2_0"=dword:00000001
 
 [HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\PassThruSupport.04.04\WiCAN]
 "Name"="WiCAN"
@@ -21,6 +22,7 @@ Windows Registry Editor Version 5.00
 "FunctionLibrary"="C:\\Program Files\\WiCAN\\wican_j2534.dll"
 "CAN"=dword:00000001
 "ISO15765"=dword:00000001
+"TP2_0"=dword:00000001
 
 ; DLL runtime config: where to reach WiCAN over IP.
 [HKEY_LOCAL_MACHINE\SOFTWARE\WiCAN\J2534]

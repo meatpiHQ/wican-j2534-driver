@@ -26,6 +26,7 @@ extern "C" {
 #define J1850VPW       1
 #define CAN            5
 #define ISO15765       6
+#define TP2_0_PS       0x800E   /* SAE J2534-2 TP2.0 */
 
 /* connect flags */
 #define CAN_29BIT_ID           0x00000100
@@ -35,6 +36,9 @@ extern "C" {
 #define TX_MSG_TYPE            0x00000001
 #define START_OF_MESSAGE       0x00000002
 #define ISO15765_ADDR_TYPE     0x00000080
+#define CONNECTION_ESTABLISHED 0x00010000   /* RxStatus: TP2.0 link is up */
+#define CONNECTION_LOST        0x00020000   /* RxStatus: TP2.0 link ended */
+#define TP2_0_BROADCAST_MSG    0x00010000   /* TxFlags */
 
 /* filter types */
 #define PASS_FILTER            0x00000001
@@ -49,12 +53,32 @@ extern "C" {
 #define CLEAR_RX_BUFFER        0x08
 #define CLEAR_PERIODIC_MSGS    0x09
 #define CLEAR_MSG_FILTERS      0x0A
+#define REQUEST_CONNECTION     0x800A  /* input: SBYTE_ARRAY, 11 bytes */
+#define TEARDOWN_CONNECTION    0x800B  /* input: SBYTE_ARRAY, 4-byte RX id */
+#define GET_DEVICE_INFO        0x800C  /* input: u32 parameter; output: u32 */
 
 /* config parameter IDs */
 #define DATA_RATE              0x01
 #define LOOPBACK               0x03
 #define ISO15765_BS            0x1E
 #define ISO15765_STMIN         0x1F
+#define J1962_PINS             0x8001
+#define TP2_0_T_BR_INT         0x8044
+#define TP2_0_T_E              0x8045
+#define TP2_0_MNTC             0x8046
+#define TP2_0_T_CTA            0x8047
+#define TP2_0_MNCT             0x8048
+#define TP2_0_MNTB             0x8049
+#define TP2_0_MNT              0x804A
+#define TP2_0_T_WAIT           0x804B
+#define TP2_0_T1               0x804C
+#define TP2_0_T3               0x804D
+#define TP2_0_IDENTIFER        0x804E  /* spelling as published for this id */
+#define TP2_0_RXIDPASSIVE      0x804F
+
+/* GET_DEVICE_INFO parameters */
+#define TP2_0_SUPPORTED        0x13
+#define TP2_0_PS_J1962         0x28
 
 /* return codes */
 #define STATUS_NOERROR              0x00
@@ -62,6 +86,7 @@ extern "C" {
 #define ERR_INVALID_CHANNEL_ID      0x02
 #define ERR_INVALID_PROTOCOL_ID     0x03
 #define ERR_NULL_PARAMETER          0x04
+#define ERR_INVALID_IOCTL_VALUE     0x05
 #define ERR_INVALID_FLAGS           0x06
 #define ERR_FAILED                  0x07
 #define ERR_DEVICE_NOT_CONNECTED    0x08
@@ -71,9 +96,11 @@ extern "C" {
 #define ERR_BUFFER_FULL             0x11
 #define ERR_INVALID_FILTER_ID       0x15
 #define ERR_NO_FLOW_CONTROL         0x16
+#define ERR_NOT_UNIQUE              0x17
 #define ERR_INVALID_BAUDRATE        0x18
 #define ERR_INVALID_DEVICE_ID       0x19
 #define ERR_DEVICE_IN_USE           0x1A
+#define ERR_NO_CONNECTION_ESTABLISHED 0x1D
 
 typedef struct {
     unsigned long ProtocolID;
