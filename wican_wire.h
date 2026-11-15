@@ -52,8 +52,9 @@
  *   SET_CONFIG / GET_CONFIG body: u32 count, then count pairs of
  *     u32 parameter, u32 value. GET_CONFIG's ACK is the status word,
  *     then that same count and the pairs with values filled.
- *   REQUEST_CONNECTION body_len is 11 and the body is those 11 bytes.
- *   TEARDOWN_CONNECTION body_len is 4 and the body is the RX id.
+ *   REQUEST_CONNECTION body is u32 11, then the 11 setup bytes
+ *     (body_len 15). TEARDOWN_CONNECTION body is u32 4, then the RX id
+ *     (body_len 8).
  *   GET_DEVICE_INFO body is one u32 parameter. Its ACK, like READ_VBATT,
  *     is the status word plus one u32. */
 

@@ -1239,13 +1239,14 @@ static long ioctl_config(unsigned long channel, unsigned long ioctl_id,
     return STATUS_NOERROR;
 }
 
-/* REQUEST_CONNECTION body is the caller's bytes (11 for a setup).
- * TEARDOWN_CONNECTION body is the 4-byte RX id. A wrong length is the
- * device's ERR_INVALID_IOCTL_VALUE; this DLL forwards the buffer. */
+/* The SBYTE_ARRAY is the caller's bytes. The wire body is u32 NumOfBytes,
+ * then those bytes, so REQUEST_CONNECTION is u32 11 plus the 11 setup
+ * bytes (body_len 15) and TEARDOWN_CONNECTION is u32 4 plus the RX id
+ * (body_len 8). A wrong length is the device's ERR_INVALID_IOCTL_VALUE. */
 static long ioctl_bytes(unsigned long channel, unsigned long ioctl_id,
                         const SBYTE_ARRAY *a)
 {
-    unsigned char body[256];
+    unsigned char body[4 + 256];
     unsigned n;
     long st;
     if (!a || (a->NumOfBytes && !a->BytePtr)) {
@@ -1253,14 +1254,15 @@ static long ioctl_bytes(unsigned long channel, unsigned long ioctl_id,
         return ERR_NULL_PARAMETER;
     }
     n = (unsigned)a->NumOfBytes;
-    if (n > sizeof(body)) {
+    if (n > 256) {
         set_err("ioctl body too long");
         return ERR_INVALID_MSG;
     }
-    if (n) memcpy(body, a->BytePtr, n);
-    st = ioctl_send((unsigned)channel, ioctl_id, body, n, NULL);
+    put_u32(body, n);
+    if (n) memcpy(body + 4, a->BytePtr, n);
+    st = ioctl_send((unsigned)channel, ioctl_id, body, 4u + n, NULL);
     log_line("PassThruIoctl: channel %lu ioctl 0x%lX body %u: status 0x%lX",
-             channel, ioctl_id, n, (unsigned long)st);
+             channel, ioctl_id, 4u + n, (unsigned long)st);
     return st;
 }
 
