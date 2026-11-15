@@ -147,6 +147,8 @@ typedef struct {
     rx_ring_t     ring[J2534_MAX_CH];
     unsigned long ch_proto[J2534_MAX_CH];
     unsigned long ch_baud[J2534_MAX_CH];
+    unsigned long ch_bs[J2534_MAX_CH];
+    unsigned long ch_stmin[J2534_MAX_CH];
     int           ch_open[J2534_MAX_CH];
 } device_t;
 
@@ -875,6 +877,8 @@ J2534_API PassThruConnect(unsigned long DeviceID, unsigned long ProtocolID,
     if (chid < 1 || chid > J2534_MAX_CH) return ERR_FAILED;
     g_dev.ch_proto[chid-1] = ProtocolID; g_dev.ch_open[chid-1] = 1;
     g_dev.ch_baud[chid-1] = BaudRate;
+    g_dev.ch_bs[chid-1] = 0;
+    g_dev.ch_stmin[chid-1] = 0;
     if (pChannelID) *pChannelID = chid;
     return STATUS_NOERROR;
 }
@@ -1081,15 +1085,17 @@ J2534_API PassThruStopPeriodicMsg(unsigned long ChannelID, unsigned long MsgID)
     return st;
 }
 
-/* GET_CONFIG: the values this device runs with (its ISO-TP flow control
- * is BS 0 / STmin 0, bus timing comes from the device settings) */
+/* GET_CONFIG: DATA_RATE is the connected baud. ISO15765_BS and
+ * ISO15765_STMIN are the last SET_CONFIG values for that channel
+ * (0 until the tool sets them). */
 static unsigned long config_value(unsigned long channel, unsigned long param)
 {
+    int have = channel >= 1 && channel <= J2534_MAX_CH;
     switch (param) {
-        case DATA_RATE:      return (channel >= 1 && channel <= J2534_MAX_CH) ? g_dev.ch_baud[channel-1] : 0;
+        case DATA_RATE:      return have ? g_dev.ch_baud[channel-1] : 0;
         case LOOPBACK:       return 0;
-        case ISO15765_BS:    return 0;
-        case ISO15765_STMIN: return 0;
+        case ISO15765_BS:    return have ? g_dev.ch_bs[channel-1] : 0;
+        case ISO15765_STMIN: return have ? g_dev.ch_stmin[channel-1] : 0;
         default:             return 0;
     }
 }
@@ -1145,9 +1151,27 @@ J2534_API PassThruIoctl(unsigned long ChannelID, unsigned long IoctlID,
     }
     if (IoctlID == SET_CONFIG && pInput) {
         const SCONFIG_LIST *l = (const SCONFIG_LIST*)pInput;
-        for (unsigned long i = 0; l->ConfigPtr && i < l->NumOfParams; i++)
-            log_line("PassThruIoctl: SET_CONFIG channel %lu param 0x%lX = %lu (device keeps its own bus timing)",
-                     ChannelID, l->ConfigPtr[i].Parameter, l->ConfigPtr[i].Value);
+        unsigned long count = (l && l->ConfigPtr) ? l->NumOfParams : 0;
+        if (count > 16) count = 16;
+        unsigned char buf[4 + 4 + 16 * 8];
+        put_u32(buf, SET_CONFIG);
+        put_u32(buf + 4, count);
+        for (unsigned long i = 0; i < count; i++) {
+            unsigned long param = l->ConfigPtr[i].Parameter;
+            unsigned long value = l->ConfigPtr[i].Value;
+            put_u32(buf + 8 + i * 8, param);
+            put_u32(buf + 12 + i * 8, value);
+            if (ChannelID >= 1 && ChannelID <= J2534_MAX_CH) {
+                if (param == ISO15765_BS) g_dev.ch_bs[ChannelID - 1] = value;
+                if (param == ISO15765_STMIN) g_dev.ch_stmin[ChannelID - 1] = value;
+            }
+            log_line("PassThruIoctl: SET_CONFIG channel %lu param 0x%lX = %lu",
+                     ChannelID, param, value);
+        }
+        long st = transact(WW_IOCTL, (unsigned)ChannelID, buf, 8 + (unsigned)count * 8, NULL);
+        log_line("PassThruIoctl: channel %lu ioctl 0x%lX: status 0x%lX",
+                 ChannelID, IoctlID, (unsigned long)st);
+        return st;
     }
     unsigned char p[4]; put_u32(p, IoctlID);
     long st = transact(WW_IOCTL, (unsigned)ChannelID, p, 4, NULL);
