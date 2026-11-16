@@ -55,7 +55,9 @@
  *   REQUEST_CONNECTION body is u32 11, then the 11 setup bytes
  *     (body_len 15). TEARDOWN_CONNECTION body is u32 4, then the RX id
  *     (body_len 8).
- *   GET_DEVICE_INFO body is one u32 parameter. Its ACK, like READ_VBATT,
- *     is the status word plus one u32. */
+ *   GET_DEVICE_INFO body is u32 count (at most 16), then count pairs of
+ *     u32 parameter, u32 value. Its ACK is the status word, the count, then
+ *     count triples of u32 parameter, u32 value, u32 supported (the SPARAM
+ *     list of SAE J2534-2 section 25). */
 
 #endif /* WICAN_WIRE_H */

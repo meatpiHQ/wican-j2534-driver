@@ -120,11 +120,24 @@ int main(void)
         sprintf(detail, "status 0x%lX", (unsigned long)st);
         check("PassThruConnect TP2_0_PS", st == STATUS_NOERROR, detail);
         if (st == STATUS_NOERROR) {
-            unsigned long param = TP2_0_SUPPORTED, value = 0;
-            long ist = Ioctl(dev, GET_DEVICE_INFO, &param, &value);
-            sprintf(detail, "status 0x%lX value %lu", (unsigned long)ist, value);
-            check("GET_DEVICE_INFO TP2_0_SUPPORTED",
-                  ist == STATUS_NOERROR && value == 1, detail);
+            /* SAE J2534-2 section 25: input NULL, output an SPARAM list.
+             * One TP2_0_PS channel is 0x00000100; the pin question keeps
+             * its value and answers in Supported; a parameter the device
+             * does not have is not supported and the call still succeeds. */
+            SPARAM sp[4] = { { TP2_0_SUPPORTED, 0, 9 },
+                             { TP2_0_PS_J1962, 0x00202000, 9 },
+                             { TP2_0_PS_J1962, 0x00010002, 9 },
+                             { 0x54, 0x1234, 9 } };
+            SPARAM_LIST list = { 4, sp };
+            long ist = Ioctl(dev, GET_DEVICE_INFO, NULL, &list);
+            sprintf(detail, "status 0x%lX value 0x%lX supported %lu %lu %lu %lu",
+                    (unsigned long)ist, sp[0].Value, sp[0].Supported,
+                    sp[1].Supported, sp[2].Supported, sp[3].Supported);
+            check("GET_DEVICE_INFO TP2_0_SUPPORTED, TP2_0_PS_J1962",
+                  ist == STATUS_NOERROR && sp[0].Value == 0x100 && sp[0].Supported == 1 &&
+                  sp[1].Supported == 1 && sp[1].Value == 0x00202000 &&
+                  sp[2].Supported == 0 && sp[3].Supported == 0 && sp[3].Value == 0x1234,
+                  detail);
             if (Disconnect) Disconnect(tp);
         }
     }

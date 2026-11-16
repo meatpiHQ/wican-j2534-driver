@@ -512,7 +512,8 @@ static const char *device_status_text(long st)
     case 0x17: return "the WiCAN refused: ERR_NOT_UNIQUE (0x17): that id is already in use";
     case 0x18: return "the WiCAN refused: ERR_INVALID_BAUDRATE (0x18): the CAN bus runs at another bit rate (the WiCAN's setting, or what it read off the wire)";
     case 0x1A: return "the WiCAN refused: ERR_DEVICE_IN_USE (0x1A): another tester is attached (TCP, USB serial or BLE)";
-    case 0x1D: return "the WiCAN refused: ERR_NO_CONNECTION_ESTABLISHED (0x1D): no TP2.0 connection for that id";
+    case ERR_NO_CONNECTION_ESTABLISHED:
+               return "the WiCAN refused: ERR_NO_CONNECTION_ESTABLISHED (0x10001): no TP2.0 connection for that id";
     default:   return "the WiCAN refused the request (the status code is in the driver log)";
     }
 }
@@ -1266,6 +1267,59 @@ static long ioctl_bytes(unsigned long channel, unsigned long ioctl_id,
     return st;
 }
 
+/* GET_DEVICE_INFO (SAE J2534-2 section 25): the application's SPARAM list
+ * goes to the device as u32 count plus (parameter, value) pairs and comes
+ * back as u32 count plus (parameter, value, supported) triples. The device
+ * answers DEV_INFO_MAX parameters per request, so a longer list goes in
+ * slices. A parameter the device does not have comes back not supported
+ * with its Value as the application set it, and the call is still
+ * STATUS_NOERROR. */
+#define DEV_INFO_MAX 16
+
+static long ioctl_device_info(SPARAM_LIST *l)
+{
+    if (!l || (l->NumOfParams && !l->ParamPtr)) {
+        set_err("GET_DEVICE_INFO requires an SPARAM_LIST in the output pointer");
+        return ERR_NULL_PARAMETER;
+    }
+    for (unsigned long at = 0; at < l->NumOfParams; at += DEV_INFO_MAX) {
+        SPARAM *p = &l->ParamPtr[at];
+        unsigned long n = l->NumOfParams - at;
+        unsigned char body[4 + DEV_INFO_MAX * 8];
+        const unsigned char *b = g_dev.ack_body;
+        long st;
+        if (n > DEV_INFO_MAX) n = DEV_INFO_MAX;
+        put_u32(body, n);
+        for (unsigned long i = 0; i < n; i++) {
+            put_u32(body + 4 + i * 8, p[i].Parameter);
+            put_u32(body + 8 + i * 8, p[i].Value);
+        }
+        st = ioctl_send(0, GET_DEVICE_INFO, body, 4u + (unsigned)n * 8u, NULL);
+        if (st != STATUS_NOERROR) {
+            log_line("PassThruIoctl: GET_DEVICE_INFO: status 0x%lX", (unsigned long)st);
+            return st;
+        }
+        if (g_dev.ack_body_len < 4u + n * 12u || get_u32(b) != n) {
+            set_err("WiCAN returned no device information; update the device firmware");
+            log_line("PassThruIoctl: GET_DEVICE_INFO: no parameter list in the ACK (%u bytes)",
+                     g_dev.ack_body_len);
+            return ERR_NOT_SUPPORTED;
+        }
+        for (unsigned long i = 0; i < n; i++) {
+            unsigned long supported = get_u32(b + 12 + i * 12);
+            if (get_u32(b + 4 + i * 12) != p[i].Parameter) {
+                set_err("WiCAN answered another parameter list than the one asked");
+                return ERR_FAILED;
+            }
+            if (supported) p[i].Value = get_u32(b + 8 + i * 12);
+            p[i].Supported = supported ? 1 : 0;
+            log_line("PassThruIoctl: GET_DEVICE_INFO param 0x%lX: value 0x%lX, %s",
+                     p[i].Parameter, p[i].Value, supported ? "supported" : "not supported");
+        }
+    }
+    return STATUS_NOERROR;
+}
+
 J2534_API PassThruIoctl(unsigned long ChannelID, unsigned long IoctlID,
                         const void *pInput, void *pOutput)
 {
@@ -1305,32 +1359,14 @@ J2534_API PassThruIoctl(unsigned long ChannelID, unsigned long IoctlID,
     }
     if (IoctlID == GET_DEVICE_INFO)
     {
-        /* Same acceptance rule as READ_VBATT: the device id, and the
-         * answer is one trailing u32 on the ACK. */
-        unsigned long value = 0;
-        unsigned char body[4];
-        long st;
+        /* The device id, by the same acceptance rule as READ_VBATT. The
+         * input pointer is NULL by the standard and is not read. */
         if (ChannelID < 1 || ChannelID > J2534_MAX_CH)
         {
             set_err("GET_DEVICE_INFO requires the device id returned by PassThruOpen");
             return ERR_INVALID_DEVICE_ID;
         }
-        if (!pInput || !pOutput)
-        {
-            set_err("GET_DEVICE_INFO requires the parameter and an output pointer");
-            return ERR_NULL_PARAMETER;
-        }
-        put_u32(body, *(const unsigned long *)pInput);
-        st = ioctl_send(0, GET_DEVICE_INFO, body, 4, &value);
-        if (st == STATUS_NOERROR) {
-            *(unsigned long *)pOutput = value;
-            log_line("PassThruIoctl: GET_DEVICE_INFO param 0x%lX = %lu",
-                     *(const unsigned long *)pInput, value);
-        } else {
-            log_line("PassThruIoctl: GET_DEVICE_INFO param 0x%lX: status 0x%lX",
-                     *(const unsigned long *)pInput, (unsigned long)st);
-        }
-        return st;
+        return ioctl_device_info((SPARAM_LIST *)pOutput);
     }
     if (IoctlID == GET_CONFIG) {
         const SCONFIG_LIST *l = (const SCONFIG_LIST*)pInput;

@@ -55,7 +55,7 @@ extern "C" {
 #define CLEAR_MSG_FILTERS      0x0A
 #define REQUEST_CONNECTION     0x800A  /* input: SBYTE_ARRAY, 11 bytes */
 #define TEARDOWN_CONNECTION    0x800B  /* input: SBYTE_ARRAY, 4-byte RX id */
-#define GET_DEVICE_INFO        0x800C  /* input: u32 parameter; output: u32 */
+#define GET_DEVICE_INFO        0x800C  /* input: NULL; output: SPARAM_LIST */
 
 /* config parameter IDs */
 #define DATA_RATE              0x01
@@ -76,9 +76,17 @@ extern "C" {
 #define TP2_0_IDENTIFER        0x804E  /* spelling as published for this id */
 #define TP2_0_RXIDPASSIVE      0x804F
 
-/* GET_DEVICE_INFO parameters */
-#define TP2_0_SUPPORTED        0x13
-#define TP2_0_PS_J1962         0x28
+/* GET_DEVICE_INFO parameters (SAE J2534-2 table 121), the ones the WiCAN
+ * answers; any other comes back not supported */
+#define J1850VPW_SUPPORTED     0x03
+#define CAN_SUPPORTED          0x06
+#define ISO15765_SUPPORTED     0x07
+#define TP2_0_SUPPORTED        0x13  /* value 0x00000100: one TP2_0_PS channel */
+#define TP2_0_PS_J1962         0x28  /* value in: the pin bitmap asked about */
+#define J1850VPW_SIMULTANEOUS  0x36
+#define CAN_SIMULTANEOUS       0x39
+#define ISO15765_SIMULTANEOUS  0x3A
+#define TP2_0_SIMULTANEOUS     0x46
 
 /* return codes */
 #define STATUS_NOERROR              0x00
@@ -100,7 +108,7 @@ extern "C" {
 #define ERR_INVALID_BAUDRATE        0x18
 #define ERR_INVALID_DEVICE_ID       0x19
 #define ERR_DEVICE_IN_USE           0x1A
-#define ERR_NO_CONNECTION_ESTABLISHED 0x1D
+#define ERR_NO_CONNECTION_ESTABLISHED 0x00010001   /* SAE J2534-2 table 123 */
 
 typedef struct {
     unsigned long ProtocolID;
@@ -126,6 +134,18 @@ typedef struct {
     unsigned long NumOfBytes;
     unsigned char *BytePtr;
 } SBYTE_ARRAY;
+
+/* GET_DEVICE_INFO (SAE J2534-2 section 25) */
+typedef struct {
+    unsigned long Parameter;   /* in */
+    unsigned long Value;       /* out, or in for the pin questions */
+    unsigned long Supported;   /* out: 1 or 0 */
+} SPARAM;
+
+typedef struct {
+    unsigned long NumOfParams;
+    SPARAM *ParamPtr;
+} SPARAM_LIST;
 
 #ifdef _WIN32
 #define J2534_API __declspec(dllexport) long __stdcall
