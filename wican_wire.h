@@ -48,7 +48,8 @@
  * rx_status u32, tx_flags u32, timestamp u32, extra_data_index u32,
  * data_size u32, data[data_size].
  *
- * WW_IOCTL payload: u32 ioctl_id, u32 body_len, body[body_len].
+ * WW_IOCTL payload: u32 ioctl_id, u32 body_len, body[body_len]. An IOCTL
+ *   without parameters is the id alone (4 bytes), as before TP2.0.
  *   SET_CONFIG / GET_CONFIG body: u32 count, then count pairs of
  *     u32 parameter, u32 value. GET_CONFIG's ACK is the status word,
  *     then that same count and the pairs with values filled.

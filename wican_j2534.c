@@ -1160,6 +1160,9 @@ static int channel_is_tp20(unsigned long channel)
 }
 
 /* WW_IOCTL payload: u32 ioctl_id, u32 body_len, body[body_len].
+ * An IOCTL without parameters (READ_VBATT, the CLEAR ones) is its id
+ * alone: the 4 bytes every driver up to 1.7 sent. The device reads that
+ * as a body of length 0.
  * The DLL does not interpret a TP2.0 telegram; the device does. */
 static long ioctl_send(unsigned channel, unsigned long ioctl_id,
                        const unsigned char *body, unsigned body_len,
@@ -1171,8 +1174,10 @@ static long ioctl_send(unsigned channel, unsigned long ioctl_id,
         return ERR_INVALID_MSG;
     }
     put_u32(buf, ioctl_id);
+    if (body_len == 0 || body == NULL)
+        return transact(WW_IOCTL, channel, buf, 4, result);
     put_u32(buf + 4, body_len);
-    if (body_len && body) memcpy(buf + 8, body, body_len);
+    memcpy(buf + 8, body, body_len);
     return transact(WW_IOCTL, channel, buf, 8 + body_len, result);
 }
 

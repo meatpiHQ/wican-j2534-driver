@@ -34,6 +34,8 @@ that installer is built from. End users: read [USER_MANUAL.md](USER_MANUAL.md).
   (the diagnostics and UDS reflash that 2008+ vehicles use), and **J1850
   VPW** (GM Class 2) on WiCAN's OBD chip. J1850 PWM, ISO9141 and ISO14230
   return `ERR_NOT_SUPPORTED` (chip-wired on the hardware, not built yet).
+  Unreleased, on main: **TP2_0_PS** (VW TP 2.0, SAE J2534-2), see
+  Versions.
 - `PassThruOpen/Close/Connect/Disconnect`, `ReadMsgs/WriteMsgs`,
   `StartMsgFilter/StopMsgFilter` (incl. FLOW_CONTROL for ISO-TP),
   `StartPeriodicMsg/StopPeriodicMsg` (tester present), `Ioctl`
@@ -50,6 +52,27 @@ no CAN-id prefix; the DLL passes it through the same way.
 
 ## Versions
 
+- **Unreleased (on main since 2026-11-17; the DLL still calls itself
+  1.7)**: VW TP 2.0 as its own protocol, `TP2_0_PS` (0x800E, SAE J2534-2
+  section 19), contributed by Elias Kotlyar. The DLL forwards a TP 2.0
+  channel to the device, which does the transport as SAE J2819 describes
+  it; the DLL keeps no state machine of its own and returns reassembled
+  messages as they arrive. On a TP 2.0 channel `SET_CONFIG` and
+  `GET_CONFIG` reach the device, `REQUEST_CONNECTION` and
+  `TEARDOWN_CONNECTION` take an SBYTE_ARRAY, and a write to an id without
+  a connection returns `ERR_NO_CONNECTION_ESTABLISHED` (0x00010001).
+  `GET_DEVICE_INFO` takes NULL and an SPARAM_LIST (section 25). A message
+  passes untouched: the two length bytes a VW ECU expects in front of a
+  message are the application's, on a write and on a read. Raw CAN:
+  `PassThruReadMsgs` returns what it has once the bus has been quiet for
+  4 ms after a frame, instead of waiting out its timeout (a tool that
+  asks for a whole TP 2.0 block in one read). An IOCTL without parameters
+  goes to the device as its id alone, as in every version before. Needs
+  firmware that serves `TP2_0_PS` (meatpi-components main of 2026-11-17
+  or later). Checked against a bench model of the document and one
+  published real exchange (`.\test.ps1 j2534tp20` in the firmware
+  repository); not run on a real ECU yet. The installer has no TP 2.0
+  registry value yet.
 - **1.7 (2026-11-14)**: the measured battery voltage, and the licence.
   `READ_VBATT` asks the device for its measured battery voltage in
   millivolts instead of returning a nominal 12,000 by itself. It needs the
