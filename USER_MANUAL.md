@@ -45,17 +45,32 @@ network to the WiCAN firmware, which drives the CAN bus.
   segments large transfers itself. J1850 VPW is request/response only and
   runs at the standard 10.4 kbit/s (GM 4x programming speed is not
   implemented).
+- **VW TP 2.0** as its own protocol (`TP2_0_PS`, SAE J2534-2), since
+  driver 1.8. WiCAN does the transport (the connection, the block
+  acknowledgements, the connection test); the application writes and
+  reads whole messages. A message passes untouched: the two length bytes
+  a VW ECU expects in front of a message are the application's. It needs
+  WiCAN PRO firmware that serves the protocol (after 6.0.0-beta.11). A
+  tool that does TP 2.0 itself on a raw CAN channel works as before. Not
+  tested on a real ECU yet.
 - The full PassThru call set a real tool uses: `PassThruOpen / Close /
   Connect / Disconnect`, `ReadMsgs / WriteMsgs`, `StartMsgFilter /
   StopMsgFilter` (including **FLOW_CONTROL** filters for ISO-TP),
   `StartPeriodicMsg / StopPeriodicMsg` (tester-present), `Ioctl`
-  (`READ_VBATT`, the `CLEAR_*` buffers), `ReadVersion`, `GetLastError`.
+  (`READ_VBATT`, the `CLEAR_*` buffers, `GET_DEVICE_INFO`, and on a
+  TP 2.0 channel `SET_CONFIG`, `GET_CONFIG`, `REQUEST_CONNECTION`,
+  `TEARDOWN_CONNECTION`), `ReadVersion`, `GetLastError`.
 
 Since driver 1.7, `READ_VBATT` reads the WiCAN's calibrated battery voltage
 in millivolts. It requires matching firmware support (WiCAN PRO
 6.0.0-beta.10 or later); old firmware without a voltage result returns
 `ERR_NOT_SUPPORTED`. Driver 1.6 and earlier return a nominal 12.0 V
 instead, so update both sides for a measured reading.
+
+Since driver 1.8, `PassThruReadMsgs` on CAN, ISO15765 and J1850 VPW
+returns the messages it has once nothing more arrived for 4 ms, instead of
+waiting for the full count until its timeout. A read that got nothing
+still waits its timeout.
 
 **Not supported**
 - J1850 PWM, ISO9141 and ISO14230 (KWP2000 over K-line), SCI: these answer
@@ -187,8 +202,9 @@ Windows Registry Editor Version 5.00
 "FunctionLibrary"="C:\\Program Files\\WiCAN\\wican_j2534.dll"
 "CAN"=dword:00000001
 "ISO15765"=dword:00000001
+"TP2_0"=dword:00000001
 
-; DLL runtime config — where to reach WiCAN (32-bit view)
+; DLL runtime config: where to reach WiCAN (32-bit view)
 [HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\WiCAN\J2534]
 "Host"="192.168.82.1"
 "Port"=dword:00001a99
@@ -242,7 +258,7 @@ Any J2534 tool works the same way. Below is the flow using the free
    see:
    - Supported Protocols: `CAN, ISO15765`
    - Device Firmware Version: `WiCAN v6`
-   - J2534 DLL Version: `WiCAN J2534 1.7`
+   - J2534 DLL Version: `WiCAN J2534 1.8`
    - SAE J2534 API Version: `04.04`
 3. **Connect.** Protocol **ISO15765**, Baud **500000**, Connect. →
    `PassThruConnect`.
@@ -389,7 +405,7 @@ since 1.4, so a problem can be shown instead of described:
 - **Ports/IPs:** TCP **6809**; USB-device `192.168.82.1`, AP
   `192.168.80.1`. USB-serial: COM port, VID `16D0` PID `1263`.
 - **Version strings** (`PassThruReadVersion`): firmware `WiCAN v6`, DLL
-  `WiCAN J2534 1.7`, API `04.04`.
+  `WiCAN J2534 1.8`, API `04.04`.
 - **Driver log:** on by default (1.4) at
   `C:\Users\Public\Documents\WiCAN\wican_j2534.log` (Start Menu: "WiCAN
   J2534 driver log"), one line per call with every message's bytes in full
@@ -398,14 +414,14 @@ since 1.4, so a problem can be shown instead of described:
   `HKLM\SOFTWARE\WiCAN\J2534` (`WOW6432Node` for 32-bit tools) move it,
   `off` disables it. The same lines go to `OutputDebugString` (DebugView)
   always.
-- **Protocols:** CAN, ISO15765, J1850 VPW. **Baud:** 500000 typical for
-  CAN (match the bus); J1850 VPW runs at 10.4 kbit/s.
+- **Protocols:** CAN, ISO15765, J1850 VPW, TP 2.0 (`TP2_0_PS`). **Baud:**
+  500000 typical for CAN (match the bus); J1850 VPW runs at 10.4 kbit/s.
 - **Exports:** the 14 `PassThru*` functions (see `wican_j2534.def`).
 - **Transports:** TCP over WiFi (AP or STA) / USB-Ethernet / USB-device
   NCM, and **USB-device CDC-ACM serial** (a virtual COM port,
   `device_class=cdc`, auto-discovered by the driver: the classic
   COM-port J2534 device).
-- **Limitations:** CAN, ISO15765 and J1850 VPW only (§1); no
+- **Limitations:** CAN, ISO15765, J1850 VPW and TP 2.0 only (§1); no
   `SetProgrammingVoltage` (returns `ERR_NOT_SUPPORTED`).
 - **Source:** https://github.com/meatpiHQ/wican-j2534-driver
 - **Licence:** GNU General Public License, version 3 (`LICENSE.txt` in

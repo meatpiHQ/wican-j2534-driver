@@ -81,6 +81,9 @@ Root: HKLM32; Subkey: "SOFTWARE\PassThruSupport.04.04\WiCAN"; ValueType: string;
 Root: HKLM32; Subkey: "SOFTWARE\PassThruSupport.04.04\WiCAN"; ValueType: string; ValueName: "FunctionLibrary"; ValueData: "{app}\wican_j2534.dll"
 Root: HKLM32; Subkey: "SOFTWARE\PassThruSupport.04.04\WiCAN"; ValueType: dword; ValueName: "CAN"; ValueData: "1"
 Root: HKLM32; Subkey: "SOFTWARE\PassThruSupport.04.04\WiCAN"; ValueType: dword; ValueName: "ISO15765"; ValueData: "1"
+; TP 2.0 (1.8): the same value as ..\wican_j2534.reg. SAE J2534-2 names no
+; registry entry for it; it reports the protocol through GET_DEVICE_INFO.
+Root: HKLM32; Subkey: "SOFTWARE\PassThruSupport.04.04\WiCAN"; ValueType: dword; ValueName: "TP2_0"; ValueData: "1"
 Root: HKLM32; Subkey: "SOFTWARE\WiCAN"; Flags: uninsdeletekeyifempty
 Root: HKLM32; Subkey: "SOFTWARE\WiCAN\J2534"; Flags: uninsdeletekey
 Root: HKLM32; Subkey: "SOFTWARE\WiCAN\J2534"; ValueType: string; ValueName: "Host"; ValueData: "{code:GetHost}"
@@ -96,6 +99,7 @@ Root: HKLM64; Subkey: "SOFTWARE\PassThruSupport.04.04\WiCAN"; ValueType: string;
 Root: HKLM64; Subkey: "SOFTWARE\PassThruSupport.04.04\WiCAN"; ValueType: string; ValueName: "FunctionLibrary"; ValueData: "{app}\wican_j2534.dll"; Check: IsWin64
 Root: HKLM64; Subkey: "SOFTWARE\PassThruSupport.04.04\WiCAN"; ValueType: dword; ValueName: "CAN"; ValueData: "1"; Check: IsWin64
 Root: HKLM64; Subkey: "SOFTWARE\PassThruSupport.04.04\WiCAN"; ValueType: dword; ValueName: "ISO15765"; ValueData: "1"; Check: IsWin64
+Root: HKLM64; Subkey: "SOFTWARE\PassThruSupport.04.04\WiCAN"; ValueType: dword; ValueName: "TP2_0"; ValueData: "1"; Check: IsWin64
 Root: HKLM64; Subkey: "SOFTWARE\WiCAN"; Flags: uninsdeletekeyifempty; Check: IsWin64
 Root: HKLM64; Subkey: "SOFTWARE\WiCAN\J2534"; Flags: uninsdeletekey; Check: IsWin64
 Root: HKLM64; Subkey: "SOFTWARE\WiCAN\J2534"; ValueType: string; ValueName: "Host"; ValueData: "{code:GetHost}"; Check: IsWin64

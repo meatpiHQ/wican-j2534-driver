@@ -78,7 +78,7 @@
 
 #define J2534_MAX_CH  8
 #define RX_RING       256
-#define DLL_VERSION   "WiCAN J2534 1.7"
+#define DLL_VERSION   "WiCAN J2534 1.8"
 /* longer than the device's longest WRITE (a multi-frame send at a slow
  * STmin is capped at 5.5 s on the device side) */
 #define ACK_WAIT_MS   8000
@@ -910,8 +910,9 @@ J2534_API PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
     unsigned long want = *pNumMsgs, got = 0;
     rx_ring_t *r = &g_dev.ring[ChannelID-1];
     DWORD deadline = GetTickCount() + Timeout;
-    /* Raw CAN: once any frame is in hand, a few quiet milliseconds means
-     * the burst stopped. MED9 asks for a whole TP2.0 block in one call
+    /* Every protocol but TP2_0_PS (the case that asked for it is raw CAN):
+     * once any message is in hand, a few quiet milliseconds mean the burst
+     * stopped. MED9 asks for a whole TP2.0 block in one call
      * (up to 20 ms). The ECU sends the block-end and then waits for the
      * tester's ACK, so filling that request holds the block-end until the
      * timeout. Bench 2026-11-15: 940 of those waits, median 34 ms, 343 of
