@@ -57,9 +57,11 @@ network to the WiCAN firmware, which drives the CAN bus.
   Connect / Disconnect`, `ReadMsgs / WriteMsgs`, `StartMsgFilter /
   StopMsgFilter` (including **FLOW_CONTROL** filters for ISO-TP),
   `StartPeriodicMsg / StopPeriodicMsg` (tester-present), `Ioctl`
-  (`READ_VBATT`, the `CLEAR_*` buffers, `GET_DEVICE_INFO`, and on a
+  (`READ_VBATT`, the `CLEAR_*` buffers, `GET_DEVICE_INFO`, on a
   TP 2.0 channel `SET_CONFIG`, `GET_CONFIG`, `REQUEST_CONNECTION`,
-  `TEARDOWN_CONNECTION`), `ReadVersion`, `GetLastError`.
+  `TEARDOWN_CONNECTION`, and on an ISO15765 channel `SET_CONFIG` and
+  `GET_CONFIG` for the flow control, see below), `ReadVersion`,
+  `GetLastError`.
 
 Since driver 1.7, `READ_VBATT` reads the WiCAN's calibrated battery voltage
 in millivolts. It requires matching firmware support (WiCAN PRO
@@ -71,6 +73,20 @@ Since driver 1.8, `PassThruReadMsgs` on CAN, ISO15765 and J1850 VPW
 returns the messages it has once nothing more arrived for 4 ms, instead of
 waiting for the full count until its timeout. A read that got nothing
 still waits its timeout.
+
+Since driver 1.9, a tool can set how an ECU sends a long answer on an
+ISO15765 channel: `SET_CONFIG` with `ISO15765_BS` (frames per block, 0 =
+the whole answer in one go) and `ISO15765_STMIN` (the gap between
+frames), and `GET_CONFIG` reads the values the WiCAN is using. Most tools
+need nothing: a channel opens with BS 8 / STmin 1 ms, as every version
+before. A tool that reads a lot of data (a flash read) can set 0 and 0
+for speed: on the bench a 4095-byte answer arrived in 0.16 s instead of
+0.72 s. With 0 and 0 the ECU sends without a pause, and an answer can be
+lost if the WiCAN saves settings at that moment (it does so shortly
+after a restart that followed a settings change): the tool sees one
+request unanswered and asks again. It needs WiCAN PRO firmware after
+6.0.0-beta.11; on older firmware the two values are accepted and nothing
+changes, and `GET_CONFIG` reads 8 and 1.
 
 **Not supported**
 - J1850 PWM, ISO9141 and ISO14230 (KWP2000 over K-line), SCI: these answer
@@ -258,7 +274,7 @@ Any J2534 tool works the same way. Below is the flow using the free
    see:
    - Supported Protocols: `CAN, ISO15765`
    - Device Firmware Version: `WiCAN v6`
-   - J2534 DLL Version: `WiCAN J2534 1.8`
+   - J2534 DLL Version: `WiCAN J2534 1.9`
    - SAE J2534 API Version: `04.04`
 3. **Connect.** Protocol **ISO15765**, Baud **500000**, Connect. →
    `PassThruConnect`.
@@ -405,7 +421,7 @@ since 1.4, so a problem can be shown instead of described:
 - **Ports/IPs:** TCP **6809**; USB-device `192.168.82.1`, AP
   `192.168.80.1`. USB-serial: COM port, VID `16D0` PID `1263`.
 - **Version strings** (`PassThruReadVersion`): firmware `WiCAN v6`, DLL
-  `WiCAN J2534 1.8`, API `04.04`.
+  `WiCAN J2534 1.9`, API `04.04`.
 - **Driver log:** on by default (1.4) at
   `C:\Users\Public\Documents\WiCAN\wican_j2534.log` (Start Menu: "WiCAN
   J2534 driver log"), one line per call with every message's bytes in full

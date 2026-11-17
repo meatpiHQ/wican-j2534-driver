@@ -78,7 +78,7 @@
 
 #define J2534_MAX_CH  8
 #define RX_RING       256
-#define DLL_VERSION   "WiCAN J2534 1.8"
+#define DLL_VERSION   "WiCAN J2534 1.9"
 /* longer than the device's longest WRITE (a multi-frame send at a slow
  * STmin is capped at 5.5 s on the device side) */
 #define ACK_WAIT_MS   8000
@@ -151,8 +151,6 @@ typedef struct {
     rx_ring_t     ring[J2534_MAX_CH];
     unsigned long ch_proto[J2534_MAX_CH];
     unsigned long ch_baud[J2534_MAX_CH];
-    unsigned long ch_bs[J2534_MAX_CH];
-    unsigned long ch_stmin[J2534_MAX_CH];
     int           ch_open[J2534_MAX_CH];
 } device_t;
 
@@ -890,8 +888,6 @@ J2534_API PassThruConnect(unsigned long DeviceID, unsigned long ProtocolID,
     if (chid < 1 || chid > J2534_MAX_CH) return ERR_FAILED;
     g_dev.ch_proto[chid-1] = ProtocolID; g_dev.ch_open[chid-1] = 1;
     g_dev.ch_baud[chid-1] = BaudRate;
-    g_dev.ch_bs[chid-1] = 0;
-    g_dev.ch_stmin[chid-1] = 0;
     if (pChannelID) *pChannelID = chid;
     return STATUS_NOERROR;
 }
@@ -1142,28 +1138,35 @@ J2534_API PassThruStopPeriodicMsg(unsigned long ChannelID, unsigned long MsgID)
     return st;
 }
 
-/* GET_CONFIG: DATA_RATE is the connected baud. ISO15765_BS and
- * ISO15765_STMIN are the last SET_CONFIG values for that channel
- * (0 until the tool sets them). */
+/* GET_CONFIG, what the DLL answers itself: DATA_RATE is the connected
+ * baud. ISO15765_BS and ISO15765_STMIN here are BS 8 / STmin 1 ms, the
+ * flow control of a device that does not answer GET_CONFIG (every
+ * firmware before 2026-11-17: it sends those whatever a tool sets). A
+ * firmware that takes the two answers with the values in force, and
+ * PassThruIoctl puts them in place of these (iso_flow_from_device). */
 static unsigned long config_value(unsigned long channel, unsigned long param)
 {
-    int have = channel >= 1 && channel <= J2534_MAX_CH;
     switch (param) {
-        case DATA_RATE:      return have ? g_dev.ch_baud[channel-1] : 0;
+        case DATA_RATE:      return (channel >= 1 && channel <= J2534_MAX_CH) ? g_dev.ch_baud[channel-1] : 0;
         case LOOPBACK:       return 0;
-        case ISO15765_BS:    return have ? g_dev.ch_bs[channel-1] : 0;
-        case ISO15765_STMIN: return have ? g_dev.ch_stmin[channel-1] : 0;
+        case ISO15765_BS:    return 8;
+        case ISO15765_STMIN: return 1;
         default:             return 0;
     }
 }
 
 #define IOCTL_CFG_MAX 64
 
-static int channel_is_tp20(unsigned long channel)
+static int channel_is(unsigned long channel, unsigned long protocol)
 {
     return channel >= 1 && channel <= J2534_MAX_CH
         && g_dev.ch_open[channel - 1]
-        && g_dev.ch_proto[channel - 1] == TP2_0_PS;
+        && g_dev.ch_proto[channel - 1] == protocol;
+}
+
+static int channel_is_tp20(unsigned long channel)
+{
+    return channel_is(channel, TP2_0_PS);
 }
 
 /* WW_IOCTL payload: u32 ioctl_id, u32 body_len, body[body_len].
@@ -1189,13 +1192,18 @@ static long ioctl_send(unsigned channel, unsigned long ioctl_id,
 }
 
 /* SET_CONFIG / GET_CONFIG body: u32 count, then count pairs. GET_CONFIG's
- * ACK is the status word, then the same count and the pairs with values. */
+ * ACK is the status word, then a count and the pairs with values.
+ * answered NULL (a TP2.0 channel): a GET the device answers nothing to is
+ * ERR_NOT_SUPPORTED. answered given (an ISO15765 channel): it receives the
+ * number of values the device filled, and none is not an error, it is a
+ * firmware that does not hold the parameters. */
 static long ioctl_config(unsigned long channel, unsigned long ioctl_id,
-                         const SCONFIG_LIST *l)
+                         const SCONFIG_LIST *l, unsigned *answered)
 {
     unsigned long count = l->NumOfParams;
     unsigned char body[4 + IOCTL_CFG_MAX * 8];
     long st;
+    if (answered) *answered = 0;
     if (count > IOCTL_CFG_MAX) {
         set_err("too many config parameters");
         return ERR_INVALID_MSG;
@@ -1223,6 +1231,7 @@ static long ioctl_config(unsigned long channel, unsigned long ioctl_id,
         unsigned filled = 0;
         unsigned long got;
         if (n < 4) {
+            if (answered) return STATUS_NOERROR;
             set_err("WiCAN returned no result; update the device firmware");
             log_line("PassThruIoctl: GET_CONFIG channel %lu: no pairs in the ACK", channel);
             return ERR_NOT_SUPPORTED;
@@ -1242,6 +1251,10 @@ static long ioctl_config(unsigned long channel, unsigned long ioctl_id,
                          channel, param, value);
             }
         }
+        if (answered) {
+            *answered = filled;
+            return STATUS_NOERROR;
+        }
         if (!filled) {
             set_err("WiCAN returned no result; update the device firmware");
             log_line("PassThruIoctl: GET_CONFIG channel %lu: ACK count %lu matched nothing",
@@ -1249,6 +1262,46 @@ static long ioctl_config(unsigned long channel, unsigned long ioctl_id,
             return ERR_NOT_SUPPORTED;
         }
     }
+    return STATUS_NOERROR;
+}
+
+/* The flow control an ISO15765 channel sends as a receiver lives in the
+ * device: ISO15765_BS and ISO15765_STMIN are sent to it (SET_CONFIG) and
+ * read back from it (GET_CONFIG). Only those two travel: the other
+ * parameters of a list stay with the DLL, as before, so a long list never
+ * runs into the device's limit of 24 pairs. */
+static int is_iso_flow_param(unsigned long param)
+{
+    return param == ISO15765_BS || param == ISO15765_STMIN;
+}
+
+/* The pairs of l that name one of the two, in l's order. */
+static unsigned long iso_flow_pick(const SCONFIG_LIST *l, SCONFIG *out, unsigned long cap)
+{
+    unsigned long n = 0;
+    for (unsigned long i = 0; i < l->NumOfParams && n < cap; i++)
+        if (is_iso_flow_param(l->ConfigPtr[i].Parameter)) out[n++] = l->ConfigPtr[i];
+    return n;
+}
+
+/* GET_CONFIG: the two values in force on the device put over the DLL's
+ * own answer. A device that answers nothing keeps the DLL's (BS 8 /
+ * STmin 1 ms, what such a firmware sends). */
+static long iso_flow_from_device(unsigned long channel, SCONFIG_LIST *l)
+{
+    SCONFIG ask[2] = { { ISO15765_BS, 0 }, { ISO15765_STMIN, 0 } };
+    SCONFIG_LIST two = { 2, ask };
+    unsigned answered = 0;
+    long st = ioctl_config(channel, GET_CONFIG, &two, &answered);
+    if (st != STATUS_NOERROR) return st;
+    if (!answered) {
+        log_line("PassThruIoctl: GET_CONFIG channel %lu: the device does not answer ISO15765_BS / ISO15765_STMIN "
+                 "(a firmware before them): it sends BS 8 / STmin 1 ms", channel);
+        return STATUS_NOERROR;
+    }
+    for (unsigned long i = 0; i < l->NumOfParams; i++)
+        for (int k = 0; k < 2; k++)
+            if (l->ConfigPtr[i].Parameter == ask[k].Parameter) l->ConfigPtr[i].Value = ask[k].Value;
     return STATUS_NOERROR;
 }
 
@@ -1384,42 +1437,44 @@ J2534_API PassThruIoctl(unsigned long ChannelID, unsigned long IoctlID,
         const SCONFIG_LIST *l = (const SCONFIG_LIST*)pInput;
         if (!l || (l->NumOfParams && !l->ConfigPtr)) return ERR_NULL_PARAMETER;
         if (channel_is_tp20(ChannelID))
-            return ioctl_config(ChannelID, GET_CONFIG, l);
-        for (unsigned long i = 0; i < l->NumOfParams; i++) {
-            l->ConfigPtr[i].Value = config_value(ChannelID, l->ConfigPtr[i].Parameter);
-            log_line("PassThruIoctl: GET_CONFIG channel %lu param 0x%lX = %lu",
-                     ChannelID, l->ConfigPtr[i].Parameter, l->ConfigPtr[i].Value);
+            return ioctl_config(ChannelID, GET_CONFIG, l, NULL);
+        {
+            int flow = 0;
+            for (unsigned long i = 0; i < l->NumOfParams; i++) {
+                l->ConfigPtr[i].Value = config_value(ChannelID, l->ConfigPtr[i].Parameter);
+                flow |= is_iso_flow_param(l->ConfigPtr[i].Parameter);
+            }
+            if (flow && channel_is(ChannelID, ISO15765)) {
+                long st = iso_flow_from_device(ChannelID, (SCONFIG_LIST *)l);
+                if (st != STATUS_NOERROR) return st;
+            }
+            for (unsigned long i = 0; i < l->NumOfParams; i++)
+                log_line("PassThruIoctl: GET_CONFIG channel %lu param 0x%lX = %lu",
+                         ChannelID, l->ConfigPtr[i].Parameter, l->ConfigPtr[i].Value);
         }
         return STATUS_NOERROR;
     }
     if (IoctlID == SET_CONFIG && channel_is_tp20(ChannelID)) {
         const SCONFIG_LIST *l = (const SCONFIG_LIST*)pInput;
         if (!l || (l->NumOfParams && !l->ConfigPtr)) return ERR_NULL_PARAMETER;
-        return ioctl_config(ChannelID, SET_CONFIG, l);
+        return ioctl_config(ChannelID, SET_CONFIG, l, NULL);
     }
     if (IoctlID == SET_CONFIG && pInput) {
         const SCONFIG_LIST *l = (const SCONFIG_LIST*)pInput;
-        unsigned long count = (l && l->ConfigPtr) ? l->NumOfParams : 0;
-        if (count > 16) count = 16;
-        unsigned char buf[4 + 4 + 16 * 8];
-        put_u32(buf, SET_CONFIG);
-        put_u32(buf + 4, count);
-        for (unsigned long i = 0; i < count; i++) {
-            unsigned long param = l->ConfigPtr[i].Parameter;
-            unsigned long value = l->ConfigPtr[i].Value;
-            put_u32(buf + 8 + i * 8, param);
-            put_u32(buf + 12 + i * 8, value);
-            if (ChannelID >= 1 && ChannelID <= J2534_MAX_CH) {
-                if (param == ISO15765_BS) g_dev.ch_bs[ChannelID - 1] = value;
-                if (param == ISO15765_STMIN) g_dev.ch_stmin[ChannelID - 1] = value;
-            }
-            log_line("PassThruIoctl: SET_CONFIG channel %lu param 0x%lX = %lu",
-                     ChannelID, param, value);
+        SCONFIG flow[IOCTL_CFG_MAX];
+        unsigned long n = 0;
+        if (l->ConfigPtr && channel_is(ChannelID, ISO15765))
+            n = iso_flow_pick(l, flow, IOCTL_CFG_MAX);
+        for (unsigned long i = 0; l->ConfigPtr && i < l->NumOfParams; i++)
+            if (!n || !is_iso_flow_param(l->ConfigPtr[i].Parameter))
+                log_line("PassThruIoctl: SET_CONFIG channel %lu param 0x%lX = %lu (device keeps its own bus timing)",
+                         ChannelID, l->ConfigPtr[i].Parameter, l->ConfigPtr[i].Value);
+        if (n) {
+            /* a firmware before the two acknowledges and keeps BS 8 / STmin
+             * 1 ms; GET_CONFIG says which it is */
+            SCONFIG_LIST picked = { n, flow };
+            return ioctl_config(ChannelID, SET_CONFIG, &picked, NULL);
         }
-        long st = transact(WW_IOCTL, (unsigned)ChannelID, buf, 8 + (unsigned)count * 8, NULL);
-        log_line("PassThruIoctl: channel %lu ioctl 0x%lX: status 0x%lX",
-                 ChannelID, IoctlID, (unsigned long)st);
-        return st;
     }
     if (IoctlID == REQUEST_CONNECTION || IoctlID == TEARDOWN_CONNECTION) {
         if (ChannelID < 1 || ChannelID > J2534_MAX_CH) return ERR_INVALID_CHANNEL_ID;

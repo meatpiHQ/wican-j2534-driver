@@ -39,9 +39,10 @@ that installer is built from. End users: read [USER_MANUAL.md](USER_MANUAL.md).
 - `PassThruOpen/Close/Connect/Disconnect`, `ReadMsgs/WriteMsgs`,
   `StartMsgFilter/StopMsgFilter` (incl. FLOW_CONTROL for ISO-TP),
   `StartPeriodicMsg/StopPeriodicMsg` (tester present), `Ioctl`
-  (READ_VBATT, CLEAR_*, GET_DEVICE_INFO, and on a TP 2.0 channel
-  SET_CONFIG, GET_CONFIG, REQUEST_CONNECTION, TEARDOWN_CONNECTION),
-  `ReadVersion`, `GetLastError`.
+  (READ_VBATT, CLEAR_*, GET_DEVICE_INFO, on a TP 2.0 channel
+  SET_CONFIG, GET_CONFIG, REQUEST_CONNECTION, TEARDOWN_CONNECTION, and
+  since 1.9 on an ISO15765 channel SET_CONFIG and GET_CONFIG for
+  `ISO15765_BS` and `ISO15765_STMIN`), `ReadVersion`, `GetLastError`.
 - `SetProgrammingVoltage` → `ERR_NOT_SUPPORTED` (no pin-control hardware).
 
 Messages are copied verbatim both ways. An ISO15765 PASSTHRU_MSG carries the
@@ -54,6 +55,35 @@ no CAN-id prefix; the DLL passes it through the same way.
 
 ## Versions
 
+- **1.9 (2026-11-17)**: the flow control of an ISO15765 channel is the
+  tool's to set. `SET_CONFIG` sends `ISO15765_BS` and `ISO15765_STMIN` to
+  the device, and `GET_CONFIG` reads the two back from it, so the DLL
+  reports what the bus sees. Contributed by Elias Kotlyar (the idea and
+  the first version; the device side is his too). Until now the DLL
+  acknowledged both and answered 8 and 1 by itself, and the device sent
+  BS 8 / STmin 1 ms whatever a tool set: an ECU's long answer came eight
+  frames at a time, one frame a millisecond. With BS 0 / STMIN 0 a
+  4095-byte answer was in the tool's hand 0.16 s after the request on the
+  bench, where it took 0.72 s with 8 / 1 (`.\test.ps1 j2534fc` in the
+  firmware repository). `ISO15765_BS` takes 0 to 0xFF, `ISO15765_STMIN`
+  0 to 0x7F (milliseconds) and 0xF1 to 0xF9 (100 to 900 microseconds);
+  another value returns `ERR_INVALID_IOCTL_VALUE` and changes nothing,
+  the good values of the same list included. The other parameters of a
+  list (`DATA_RATE`, `LOOPBACK`, ...) stay with the DLL, as before. A
+  channel still opens with BS 8 / STmin 1 ms, not with the 0 and 0 SAE
+  J2534-1 names: with BS 0 an ECU may send a whole answer without a
+  pause, and when the WiCAN writes its own flash during such an answer
+  it loses frames and the answer with them (seen on the bench while the
+  unit saved its configuration backup after a settings change; with the
+  flash at rest 100 answers of 4095 bytes in a row arrived whole). The
+  tool sees that one request unanswered. A tool that sets 0 / 0 gets the
+  speed and that exposure; a tool that sets nothing sees no change. It
+  needs firmware that takes the two (WiCAN PRO after 6.0.0-beta.11). On
+  older firmware `SET_CONFIG` is acknowledged without effect, as in every
+  version before, and `GET_CONFIG` tells: it reads 8 and 1 whatever was
+  set. For a tool that already sets them: udsoncan's J2534 connection
+  sets BS 0x20 / STMIN 0, so its long answers now come 32 frames at a
+  time without a gap.
 - **1.8 (2026-11-17)**: VW TP 2.0 as its own protocol, `TP2_0_PS`
   (0x800E, SAE J2534-2 section 19), contributed by Elias Kotlyar. The DLL forwards a TP 2.0
   channel to the device, which does the transport as SAE J2819 describes
