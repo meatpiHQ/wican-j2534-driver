@@ -69,21 +69,20 @@ no CAN-id prefix; the DLL passes it through the same way.
   0 to 0x7F (milliseconds) and 0xF1 to 0xF9 (100 to 900 microseconds);
   another value returns `ERR_INVALID_IOCTL_VALUE` and changes nothing,
   the good values of the same list included. The other parameters of a
-  list (`DATA_RATE`, `LOOPBACK`, ...) stay with the DLL, as before. A
-  channel still opens with BS 8 / STmin 1 ms, not with the 0 and 0 SAE
-  J2534-1 names: with BS 0 an ECU may send a whole answer without a
-  pause, and when the WiCAN writes its own flash during such an answer
-  it loses frames and the answer with them (seen on the bench while the
-  unit saved its configuration backup after a settings change; with the
-  flash at rest 100 answers of 4095 bytes in a row arrived whole). The
-  tool sees that one request unanswered. A tool that sets 0 / 0 gets the
-  speed and that exposure; a tool that sets nothing sees no change. It
+  list (`DATA_RATE`, `LOOPBACK`, ...) stay with the DLL, as before. It
   needs firmware that takes the two (WiCAN PRO after 6.0.0-beta.11). On
-  older firmware `SET_CONFIG` is acknowledged without effect, as in every
+  that firmware a channel opens with BS 0 / STmin 0, the defaults SAE
+  J2534-1 names, so a tool that sets nothing gets its long answers in one
+  go as well; a tool that wants the old pace sets 8 and 1. On older
+  firmware `SET_CONFIG` is acknowledged without effect, as in every
   version before, and `GET_CONFIG` tells: it reads 8 and 1 whatever was
-  set. For a tool that already sets them: udsoncan's J2534 connection
-  sets BS 0x20 / STMIN 0, so its long answers now come 32 frames at a
-  time without a gap.
+  set, which is what such a firmware sends. With BS 0 an ECU may send a
+  whole answer without a pause. The same firmware deepens the WiCAN's CAN
+  receive queue for that: while it held 64 frames, an answer was lost on
+  the bench when the WiCAN wrote its own flash in the middle of it, and
+  with 256 the same test loses none. For a tool that already sets the
+  two: udsoncan's J2534 connection sets BS 0x20 / STMIN 0, so its long
+  answers come 32 frames at a time without a gap.
 - **1.8 (2026-11-17)**: VW TP 2.0 as its own protocol, `TP2_0_PS`
   (0x800E, SAE J2534-2 section 19), contributed by Elias Kotlyar. The DLL forwards a TP 2.0
   channel to the device, which does the transport as SAE J2819 describes

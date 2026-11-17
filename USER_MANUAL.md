@@ -77,16 +77,14 @@ still waits its timeout.
 Since driver 1.9, a tool can set how an ECU sends a long answer on an
 ISO15765 channel: `SET_CONFIG` with `ISO15765_BS` (frames per block, 0 =
 the whole answer in one go) and `ISO15765_STMIN` (the gap between
-frames), and `GET_CONFIG` reads the values the WiCAN is using. Most tools
-need nothing: a channel opens with BS 8 / STmin 1 ms, as every version
-before. A tool that reads a lot of data (a flash read) can set 0 and 0
-for speed: on the bench a 4095-byte answer arrived in 0.16 s instead of
-0.72 s. With 0 and 0 the ECU sends without a pause, and an answer can be
-lost if the WiCAN saves settings at that moment (it does so shortly
-after a restart that followed a settings change): the tool sees one
-request unanswered and asks again. It needs WiCAN PRO firmware after
-6.0.0-beta.11; on older firmware the two values are accepted and nothing
-changes, and `GET_CONFIG` reads 8 and 1.
+frames), and `GET_CONFIG` reads the values the WiCAN is using. It needs
+WiCAN PRO firmware after 6.0.0-beta.11. With that firmware a channel
+opens with 0 and 0, as SAE J2534-1 says, so a long answer arrives in one
+go without the tool doing anything: on the bench a 4095-byte answer
+arrived in 0.16 s instead of 0.72 s. A tool that needs the old pace sets
+`ISO15765_BS` 8 and `ISO15765_STMIN` 1. On older firmware the two values
+are accepted and nothing changes: the WiCAN sends 8 and 1 whatever is
+set, and `GET_CONFIG` reads 8 and 1.
 
 **Not supported**
 - J1850 PWM, ISO9141 and ISO14230 (KWP2000 over K-line), SCI: these answer
