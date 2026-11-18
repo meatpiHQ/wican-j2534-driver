@@ -43,6 +43,8 @@ that installer is built from. End users: read [USER_MANUAL.md](USER_MANUAL.md).
   SET_CONFIG, GET_CONFIG, REQUEST_CONNECTION, TEARDOWN_CONNECTION, and
   since 1.9 on an ISO15765 channel SET_CONFIG and GET_CONFIG for
   `ISO15765_BS` and `ISO15765_STMIN`), `ReadVersion`, `GetLastError`.
+  The return codes carry SAE J2534-1's numbers since 1.10, and
+  `ReadMsgs` reports lost messages with `ERR_BUFFER_OVERFLOW`.
 - `SetProgrammingVoltage` → `ERR_NOT_SUPPORTED` (no pin-control hardware).
 
 Messages are copied verbatim both ways. An ISO15765 PASSTHRU_MSG carries the
@@ -55,6 +57,54 @@ no CAN-id prefix; the DLL passes it through the same way.
 
 ## Versions
 
+- **1.10 (2026-11-18)**: the return codes are SAE J2534-1's numbers, and
+  lost messages are reported. Up to 1.9 seven return codes had the wrong
+  number, in this driver's header and in the WiCAN firmware alike:
+
+  | Return code | up to 1.9 | 1.10, SAE J2534-1 |
+  |---|---|---|
+  | `ERR_DEVICE_IN_USE` | 0x1A | 0x0E |
+  | `ERR_MSG_PROTOCOL_ID` | 0x14 | 0x15 |
+  | `ERR_INVALID_FILTER_ID` | 0x15 | 0x16 |
+  | `ERR_NO_FLOW_CONTROL` | 0x16 | 0x17 |
+  | `ERR_NOT_UNIQUE` | 0x17 | 0x18 |
+  | `ERR_INVALID_BAUDRATE` | 0x18 | 0x19 |
+  | `ERR_INVALID_DEVICE_ID` | 0x19 | 0x1A |
+
+  An application that follows the standard read "the bus runs at another
+  bit rate" as `ERR_NOT_UNIQUE` and "no such device id" as
+  `ERR_INVALID_BAUDRATE`. Only refusals were affected, and the text of
+  `PassThruGetLastError` was right all along. From 1.10 the application
+  gets the standard's numbers **with any firmware**: the driver asks the
+  WiCAN for wire version 2 in its `HELLO`, where the device answers the
+  standard's numbers itself; a firmware from before (it answers version
+  1) still sends the old ones and the driver turns them into the
+  standard's. A program that was written against this driver's old
+  numbers (one that compares a return value with 0x18, say) must follow.
+  Firmware with wire version 2 answers a driver up to 1.9 with the old
+  numbers, so an old driver on new firmware behaves as it always did.
+
+  `PassThruReadMsgs` returns `ERR_BUFFER_OVERFLOW` (0x12) when received
+  messages were lost, as SAE J2534-1 asks. The call still hands messages
+  over (`pNumMsgs` counts them, they are valid); the first of them is the
+  first message received after the loss, so the gap is always in front of
+  what that call returned (a read that is filling up stops in front of
+  such a message and the next call returns it). Two places lose messages.
+  The WiCAN's own receive queue of a channel (256 bus frames) runs over
+  when the driver's link cannot keep up with the bus: firmware with wire
+  version 2 then says how many are missing and where (an `EVENT` frame,
+  `J2534_WIRE_PROTOCOL.md` section 13; older firmware cannot say). The
+  driver's own queue (255 messages a channel) runs over when the
+  application does not call `PassThruReadMsgs`: that is reported with any
+  firmware. Until 1.9 both were silent. The driver log has a line for
+  each loss with the count. The `BUFFER_OVERFLOW` bit that API 05.00 has
+  in `RxStatus` is not set: this driver speaks API 04.04, which has no
+  such bit. `PassThruOpen` on a WiCAN that says another tester holds it
+  (over USB serial or Bluetooth) returns `ERR_DEVICE_IN_USE` with the
+  last-error text, where it returned `ERR_FAILED` "HELLO failed". Checked
+  against fake devices of both wire versions and against the WiCAN with
+  both firmware generations (`.\test.ps1 j2534session` in the firmware
+  repository).
 - **1.9 (2026-11-17)**: the flow control of an ISO15765 channel is the
   tool's to set. `SET_CONFIG` sends `ISO15765_BS` and `ISO15765_STMIN` to
   the device, and `GET_CONFIG` reads the two back from it, so the DLL

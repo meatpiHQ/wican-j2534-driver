@@ -86,6 +86,20 @@ arrived in 0.16 s instead of 0.72 s. A tool that needs the old pace sets
 are accepted and nothing changes: the WiCAN sends 8 and 1 whatever is
 set, and `GET_CONFIG` reads 8 and 1.
 
+Since driver 1.10, the return codes carry the numbers SAE J2534-1 gives
+them. Up to 1.9 seven of them were numbered wrong: `ERR_DEVICE_IN_USE`
+was 0x1A (the standard: 0x0E), and `ERR_MSG_PROTOCOL_ID`,
+`ERR_INVALID_FILTER_ID`, `ERR_NO_FLOW_CONTROL`, `ERR_NOT_UNIQUE`,
+`ERR_INVALID_BAUDRATE` and `ERR_INVALID_DEVICE_ID` were 0x14 to 0x19 (the
+standard: 0x15 to 0x1A), so a tool showed the wrong reason for a refusal.
+The driver gives the right numbers with any WiCAN firmware. Since 1.10
+`PassThruReadMsgs` also tells the tool when received messages were lost
+(the tool did not read for a while, or the link to the WiCAN is slower
+than the vehicle bus): it returns `ERR_BUFFER_OVERFLOW` together with the
+first messages behind the gap. Before, such a loss was silent. Losses
+inside the WiCAN are reported with WiCAN PRO firmware after
+6.0.0-beta.11.
+
 **Not supported**
 - J1850 PWM, ISO9141 and ISO14230 (KWP2000 over K-line), SCI: these answer
   `ERR_NOT_SUPPORTED` (chip-wired on the hardware, not built yet).
@@ -272,7 +286,7 @@ Any J2534 tool works the same way. Below is the flow using the free
    see:
    - Supported Protocols: `CAN, ISO15765`
    - Device Firmware Version: `WiCAN v6`
-   - J2534 DLL Version: `WiCAN J2534 1.9`
+   - J2534 DLL Version: `WiCAN J2534 1.10`
    - SAE J2534 API Version: `04.04`
 3. **Connect.** Protocol **ISO15765**, Baud **500000**, Connect. →
    `PassThruConnect`.
@@ -419,7 +433,7 @@ since 1.4, so a problem can be shown instead of described:
 - **Ports/IPs:** TCP **6809**; USB-device `192.168.82.1`, AP
   `192.168.80.1`. USB-serial: COM port, VID `16D0` PID `1263`.
 - **Version strings** (`PassThruReadVersion`): firmware `WiCAN v6`, DLL
-  `WiCAN J2534 1.9`, API `04.04`.
+  `WiCAN J2534 1.10`, API `04.04`.
 - **Driver log:** on by default (1.4) at
   `C:\Users\Public\Documents\WiCAN\wican_j2534.log` (Start Menu: "WiCAN
   J2534 driver log"), one line per call with every message's bytes in full

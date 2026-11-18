@@ -19,7 +19,13 @@
 #include <stdint.h>
 
 #define WW_MAGIC        0x4A35u   /* "J5" */
-#define WW_VERSION      1
+#define WW_VERSION      1         /* the header's version byte: the framing */
+/* The wire version of a session, asked for in HELLO's payload and answered
+ * in its ACK (1.10). Version 2: the status of an ACK is SAE J2534-1's own
+ * number, and the device sends EVENT frames. A firmware before it ignores
+ * the payload and answers 1: its statuses from 0x14 to 0x1A are the old
+ * numbers, which the DLL turns into SAE's (status_from_device). */
+#define WW_SESSION_VERSION 2
 #define WW_HDR_SIZE     12
 #define WW_MAX_DATA     4128
 /* the device's request payload cap (J2534_RX_CAP): one WRITE_MSGS with
@@ -42,6 +48,11 @@
 #define WW_ACK            0x80
 #define WW_RX_MSG         0x81
 #define WW_EVENT          0x82
+
+/* WW_EVENT payload (wire version 2): u32 event, u32 value; the header's
+ * channel is the channel it is about. */
+#define WW_EVENT_RX_LOST  1   /* value messages were lost in front of the
+                                 channel's next WW_RX_MSG */
 
 /* 12-byte header, little-endian: magic u16, ver u8, type u8, seq u16,
  * channel u16, length u32. PASSTHRU_MSG on the wire: protocol u32,

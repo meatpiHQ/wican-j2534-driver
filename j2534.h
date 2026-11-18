@@ -10,7 +10,7 @@
  */
 
 /*
- * j2534.h — SAE J2534-1 (04.04) PassThru API surface (subset WiCAN
+ * j2534.h: SAE J2534-1 (04.04) PassThru API surface (subset WiCAN
  * implements). Standard types/prototypes a J2534 application links against.
  */
 #ifndef J2534_H
@@ -88,7 +88,9 @@ extern "C" {
 #define ISO15765_SIMULTANEOUS  0x3A
 #define TP2_0_SIMULTANEOUS     0x46
 
-/* return codes */
+/* return codes: SAE J2534-1's numbers. Up to driver 1.9 the seven from
+ * ERR_MSG_PROTOCOL_ID on were one too low (0x14 to 0x19) and
+ * ERR_DEVICE_IN_USE was 0x1A, in this header and in the firmware alike. */
 #define STATUS_NOERROR              0x00
 #define ERR_NOT_SUPPORTED           0x01
 #define ERR_INVALID_CHANNEL_ID      0x02
@@ -100,14 +102,17 @@ extern "C" {
 #define ERR_DEVICE_NOT_CONNECTED    0x08
 #define ERR_TIMEOUT                 0x09
 #define ERR_INVALID_MSG             0x0A
+#define ERR_EXCEEDED_LIMIT          0x0C
+#define ERR_DEVICE_IN_USE           0x0E
 #define ERR_BUFFER_EMPTY            0x10
 #define ERR_BUFFER_FULL             0x11
-#define ERR_INVALID_FILTER_ID       0x15
-#define ERR_NO_FLOW_CONTROL         0x16
-#define ERR_NOT_UNIQUE              0x17
-#define ERR_INVALID_BAUDRATE        0x18
-#define ERR_INVALID_DEVICE_ID       0x19
-#define ERR_DEVICE_IN_USE           0x1A
+#define ERR_BUFFER_OVERFLOW         0x12   /* PassThruReadMsgs: messages were lost */
+#define ERR_MSG_PROTOCOL_ID         0x15
+#define ERR_INVALID_FILTER_ID       0x16
+#define ERR_NO_FLOW_CONTROL         0x17
+#define ERR_NOT_UNIQUE              0x18
+#define ERR_INVALID_BAUDRATE        0x19
+#define ERR_INVALID_DEVICE_ID       0x1A
 #define ERR_NO_CONNECTION_ESTABLISHED 0x00010001   /* SAE J2534-2 table 123 */
 
 typedef struct {

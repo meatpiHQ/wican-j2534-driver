@@ -50,6 +50,14 @@
  * ERR_BUFFER_EMPTY whatever the Timeout: udsoncan's released reader takes
  * ERR_TIMEOUT as data.
  *
+ * 1.10 (2026-11-18): the return codes are SAE J2534-1's numbers (the
+ * seven from ERR_MSG_PROTOCOL_ID on were one too low, ERR_DEVICE_IN_USE
+ * was 0x1A), whatever the firmware: HELLO asks for wire version 2, where
+ * the device answers SAE's numbers itself, and the numbers of a firmware
+ * that answers 1 are turned into them here. PassThruReadMsgs returns
+ * ERR_BUFFER_OVERFLOW when messages were lost in front of the first one
+ * it hands over (the device's EVENT RX_LOST, or this DLL's own ring).
+ *
  * Build: CMakeLists.txt (MSVC or MinGW). 32-bit is the safe default:
  * most OEM J2534 apps load a 32-bit DLL.
  */
@@ -78,7 +86,7 @@
 
 #define J2534_MAX_CH  8
 #define RX_RING       256
-#define DLL_VERSION   "WiCAN J2534 1.9"
+#define DLL_VERSION   "WiCAN J2534 1.10"
 /* longer than the device's longest WRITE (a multi-frame send at a slow
  * STmin is capped at 5.5 s on the device side) */
 #define ACK_WAIT_MS   8000
@@ -91,6 +99,12 @@
 
 typedef struct {
     PASSTHRU_MSG msg[RX_RING];
+    /* 1.10: messages were lost in front of msg[i] (SAE J2534-1 names the
+     * first message received after a receive buffer overflow). Lost in the
+     * device (its EVENT RX_LOST) or here (the ring was full). */
+    unsigned char lost_before[RX_RING];
+    unsigned long lost_pending;   /* lost since the last message pushed */
+    unsigned long lost_total;     /* since PassThruOpen, for the log */
     volatile int head, tail;
     CRITICAL_SECTION cs;
     HANDLE ev;                /* auto-reset: a message was pushed (1.4) */
@@ -102,6 +116,9 @@ typedef struct {
     HANDLE hcom;              /* CDC-ACM COM port (overlapped) */
     HANDLE rd_ev, wr_ev;      /* per-direction OVERLAPPED events */
     volatile int connected;
+    /* 1.10: the wire version the device answered in HELLO. 1 = a firmware
+     * whose statuses from 0x14 to 0x1A are the old numbers. */
+    volatile unsigned wire_ver;
     unsigned seq;
     CRITICAL_SECTION tx_cs;   /* the write of one request */
     CRITICAL_SECTION req_cs;  /* one request/ACK cycle at a time */
@@ -424,23 +441,83 @@ static void decode_msg(const unsigned char *buf, int len, PASSTHRU_MSG *m)
 
 /* ---- reader thread: single recv() owner ------------------------------ */
 
-static void ring_push(rx_ring_t *r, const PASSTHRU_MSG *m)
+/* 1.10, SAE J2534-1 on a receive buffer overflow: new messages are
+ * discarded while the buffer is full, and the first message received after
+ * it tells the application that some are missing in front of it
+ * (PassThruReadMsgs returns ERR_BUFFER_OVERFLOW for it). Until 1.9 a full
+ * ring dropped the new message and nobody was told. Returns how many
+ * messages this push found lost in front of it (0: none; -1: the ring is
+ * full and this one is lost too). */
+static long ring_push(rx_ring_t *r, const PASSTHRU_MSG *m)
 {
+    long lost = 0;
     EnterCriticalSection(&r->cs);
     int next = (r->head + 1) % RX_RING;
-    if (next != r->tail) { r->msg[r->head] = *m; r->head = next; }
-    /* else drop the new one (ring full) */
+    if (next != r->tail) {
+        lost = (long)r->lost_pending;
+        r->lost_before[r->head] = r->lost_pending != 0;
+        r->lost_pending = 0;
+        r->msg[r->head] = *m; r->head = next;
+    } else {
+        r->lost_pending++; r->lost_total++;
+        lost = -1;
+    }
     LeaveCriticalSection(&r->cs);
     if (r->ev) SetEvent(r->ev);   /* wake a PassThruReadMsgs waiting on it */
+    return lost;
 }
 
-static int ring_pop(rx_ring_t *r, PASSTHRU_MSG *out)
+/* the device lost n messages of the channel in front of its next one */
+static void ring_lost(rx_ring_t *r, unsigned long n)
+{
+    EnterCriticalSection(&r->cs);
+    r->lost_pending += n; r->lost_total += n;
+    LeaveCriticalSection(&r->cs);
+}
+
+/* *lost: messages are missing in front of the one handed over */
+static int ring_pop(rx_ring_t *r, PASSTHRU_MSG *out, int *lost)
 {
     int got = 0;
     EnterCriticalSection(&r->cs);
-    if (r->tail != r->head) { *out = r->msg[r->tail]; r->tail = (r->tail+1)%RX_RING; got = 1; }
+    if (r->tail != r->head) {
+        *out = r->msg[r->tail]; *lost = r->lost_before[r->tail];
+        r->tail = (r->tail+1)%RX_RING; got = 1;
+    }
     LeaveCriticalSection(&r->cs);
     return got;
+}
+
+/* the next message to hand over has messages missing in front of it */
+static int ring_next_lost(rx_ring_t *r)
+{
+    int lost;
+    EnterCriticalSection(&r->cs);
+    lost = r->tail != r->head && r->lost_before[r->tail];
+    LeaveCriticalSection(&r->cs);
+    return lost;
+}
+
+/* a channel that closes takes its messages with it */
+static void ring_clear(rx_ring_t *r)
+{
+    EnterCriticalSection(&r->cs);
+    r->head = r->tail = 0; r->lost_pending = 0;
+    LeaveCriticalSection(&r->cs);
+}
+
+/* 1.10: a status as the device sent it, in SAE J2534-1's numbers. A
+ * firmware of wire version 1 numbers the seven codes from
+ * ERR_MSG_PROTOCOL_ID on one too low (0x14 to 0x19) and sends
+ * ERR_DEVICE_IN_USE as 0x1A; version 2 sends SAE's own. Before HELLO is
+ * answered wire_ver is 1, and the one refusal a device sends there is
+ * "in use": 0x1A from a version 1 firmware, 0x0E from a later one. */
+static unsigned long status_from_device(unsigned long st)
+{
+    if (g_dev.wire_ver >= 2) return st;
+    if (st >= 0x14 && st <= 0x19) return st + 1;
+    if (st == 0x1A) return ERR_DEVICE_IN_USE;
+    return st;
 }
 
 static DWORD WINAPI reader_thread(LPVOID arg)
@@ -458,7 +535,7 @@ static DWORD WINAPI reader_thread(LPVOID arg)
         if (len && !io_read_all(payload, (int)len)) break;
 
         if (type == WW_ACK) {
-            unsigned long st  = (len>=4) ? get_u32(payload) : ERR_FAILED;
+            unsigned long st  = (len>=4) ? status_from_device(get_u32(payload)) : ERR_FAILED;
             unsigned long res = (len>=8) ? get_u32(payload+4) : 0;
             if (seq == g_dev.await_seq && !g_dev.ack_ready) {
                 unsigned extra = (len > 4) ? (unsigned)(len - 4) : 0;
@@ -476,9 +553,22 @@ static DWORD WINAPI reader_thread(LPVOID arg)
             }
         } else if (type == WW_RX_MSG && ch >= 1 && ch <= J2534_MAX_CH) {
             PASSTHRU_MSG m; decode_msg(payload, (int)len, &m);
-            ring_push(&g_dev.ring[ch-1], &m);
+            long lost = ring_push(&g_dev.ring[ch-1], &m);
+            if (lost > 0)
+                log_line("reader: channel %u: %ld message(s) were lost in front of this one (%lu since open): "
+                         "PassThruReadMsgs will return ERR_BUFFER_OVERFLOW for it",
+                         ch, lost, g_dev.ring[ch-1].lost_total);
+            else if (lost < 0 && g_dev.ring[ch-1].lost_pending == 1)
+                log_line("reader: channel %u: the application is not reading, %d messages wait: new ones are lost "
+                         "until it does", ch, RX_RING - 1);
+        } else if (type == WW_EVENT && len >= 8 && ch >= 1 && ch <= J2534_MAX_CH) {
+            /* 1.10 (wire version 2): what the device has to say unasked */
+            unsigned long ev = get_u32(payload), val = get_u32(payload + 4);
+            if (ev == WW_EVENT_RX_LOST && val) {
+                ring_lost(&g_dev.ring[ch-1], val);
+                log_line("reader: channel %u: the WiCAN lost %lu received message(s) (its receive queue ran over)", ch, val);
+            }
         }
-        /* WW_EVENT: ignored for now */
     }
     g_dev.connected = 0;
     SetEvent(g_dev.ack_ev);   /* a waiting transact() learns of the end */
@@ -490,8 +580,9 @@ static DWORD WINAPI reader_thread(LPVOID arg)
 
 /* 1.5: a device refusal in words for PassThruGetLastError. Until then a
  * status the WiCAN answered left "no error" behind, and a tool's dialog
- * said nothing useful (the field report of 2026-10-27). The codes are the
- * wire protocol's (J2534_WIRE_PROTOCOL.md section 5). */
+ * said nothing useful (the field report of 2026-10-27). The codes are SAE
+ * J2534-1's since 1.10: status_from_device() has already turned an older
+ * firmware's numbers into them (J2534_WIRE_PROTOCOL.md section 5). */
 static const char *device_status_text(long st)
 {
     switch (st) {
@@ -506,12 +597,20 @@ static const char *device_status_text(long st)
     case 0x09: return "the WiCAN refused: ERR_TIMEOUT (0x09): the ISO-TP transfer timed out (no flow control or no answer from the ECU)";
     case 0x0A: return "the WiCAN refused: ERR_INVALID_MSG (0x0A): malformed message (a CAN frame is the 4-byte id + 0..8 bytes, an ISO15765 message the id + the payload; extended addressing is not supported)";
     case 0x0C: return "the WiCAN refused: ERR_EXCEEDED_LIMIT (0x0C): the channel's filter table (8) or its ISO-TP sessions (4) are full";
-    case 0x14: return "the WiCAN refused: ERR_MSG_PROTOCOL_ID (0x14): the message's protocol does not match the channel";
-    case 0x15: return "the WiCAN refused: ERR_INVALID_FILTER_ID (0x15)";
-    case 0x16: return "the WiCAN refused: ERR_NO_FLOW_CONTROL (0x16): a multi-frame ISO15765 message to an id with no FLOW_CONTROL filter";
-    case 0x17: return "the WiCAN refused: ERR_NOT_UNIQUE (0x17): that id is already in use";
-    case 0x18: return "the WiCAN refused: ERR_INVALID_BAUDRATE (0x18): the CAN bus runs at another bit rate (the WiCAN's setting, or what it read off the wire)";
-    case 0x1A: return "the WiCAN refused: ERR_DEVICE_IN_USE (0x1A): another tester is attached (TCP, USB serial or BLE)";
+    case ERR_DEVICE_IN_USE:
+               return "the WiCAN refused: ERR_DEVICE_IN_USE (0x0E): another tester is attached (TCP, USB serial or BLE)";
+    case ERR_MSG_PROTOCOL_ID:
+               return "the WiCAN refused: ERR_MSG_PROTOCOL_ID (0x15): the message's protocol does not match the channel";
+    case ERR_INVALID_FILTER_ID:
+               return "the WiCAN refused: ERR_INVALID_FILTER_ID (0x16)";
+    case ERR_NO_FLOW_CONTROL:
+               return "the WiCAN refused: ERR_NO_FLOW_CONTROL (0x17): a multi-frame ISO15765 message to an id with no FLOW_CONTROL filter";
+    case ERR_NOT_UNIQUE:
+               return "the WiCAN refused: ERR_NOT_UNIQUE (0x18): that id is already in use";
+    case ERR_INVALID_BAUDRATE:
+               return "the WiCAN refused: ERR_INVALID_BAUDRATE (0x19): the CAN bus runs at another bit rate (the WiCAN's setting, or what it read off the wire)";
+    case ERR_INVALID_DEVICE_ID:
+               return "the WiCAN refused: ERR_INVALID_DEVICE_ID (0x1A)";
     case ERR_NO_CONNECTION_ESTABLISHED:
                return "the WiCAN refused: ERR_NO_CONNECTION_ESTABLISHED (0x10001): no TP2.0 connection for that id";
     default:   return "the WiCAN refused the request (the status code is in the driver log)";
@@ -821,14 +920,27 @@ J2534_API PassThruOpen(const void *pName, unsigned long *pDeviceID)
     g_dev.flusher_run = 1;
     g_dev.flusher = g_dev.flush_ev ? CreateThread(NULL, 0, flusher_thread, NULL, 0, NULL) : NULL;
 
+    /* 1.10: HELLO asks for wire version 2 (SAE's status numbers, EVENT
+     * frames). A firmware before it ignores the payload and answers 1. */
     unsigned long result = 0;
-    unsigned char p[4]; put_u32(p, WW_VERSION);
-    if (transact(WW_HELLO, 0, p, 4, &result) != STATUS_NOERROR) {
+    unsigned char p[4]; put_u32(p, WW_SESSION_VERSION);
+    g_dev.wire_ver = 1;
+    long hst = transact(WW_HELLO, 0, p, 4, &result);
+    if (hst != STATUS_NOERROR) {
+        char why[sizeof(g_last_error)];
+        strcpy(why, g_last_error);
         transport_teardown(); locks_delete();
+        log_line("PassThruOpen: HELLO failed: status 0x%lX (%s)", (unsigned long)hst, why);
+        if (hst == ERR_DEVICE_IN_USE) {
+            /* the device said so: another tester holds it (1.10: the
+             * application gets the standard's code, ERR_FAILED before) */
+            set_err(device_status_text(hst));
+            return ERR_DEVICE_IN_USE;
+        }
         set_err("HELLO failed");
-        log_line("PassThruOpen: HELLO failed (%s)", g_last_error);
         return ERR_FAILED;
     }
+    g_dev.wire_ver = result >= 2 ? 2 : 1;
     unsigned long dev = 0;
     if (transact(WW_OPEN, 0, NULL, 0, &dev) != STATUS_NOERROR) {
         transport_teardown(); locks_delete();
@@ -840,9 +952,12 @@ J2534_API PassThruOpen(const void *pName, unsigned long *pDeviceID)
     g_open = 1;
     if (pDeviceID) *pDeviceID = dev ? dev : 1;
     set_err("no error");
-    log_line("PassThruOpen: %s %s%s: ok, wire v%lu, device %lu (" DLL_VERSION "); log %s",
+    log_line("PassThruOpen: %s %s%s: ok, wire v%lu%s, device %lu (" DLL_VERSION "); log %s",
              tgt.serial ? "serial" : "tcp", tgt.serial ? tgt.com : tgt.host,
-             tgt.serial ? "" : "", result, dev ? dev : 1,
+             tgt.serial ? "" : "", result,
+             g_dev.wire_ver >= 2 ? "" : " (a firmware before wire version 2: its status numbers are turned into SAE's here, "
+                                        "and it does not report lost messages)",
+             dev ? dev : 1,
              g_log ? g_log_path : "off (OutputDebugString only)");
     return STATUS_NOERROR;
 }
@@ -897,6 +1012,7 @@ J2534_API PassThruDisconnect(unsigned long ChannelID)
     if (!g_open || ChannelID<1 || ChannelID>J2534_MAX_CH) return ERR_INVALID_CHANNEL_ID;
     long st = transact(WW_DISCONNECT, (unsigned)ChannelID, NULL, 0, NULL);
     g_dev.ch_open[ChannelID-1] = 0;
+    ring_clear(&g_dev.ring[ChannelID-1]);   /* 1.10: the next channel with this id starts empty */
     log_line("PassThruDisconnect: channel %lu: status 0x%lX", ChannelID, (unsigned long)st);
     return st;
 }
@@ -922,8 +1038,16 @@ J2534_API PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
      * TP2_0_PS is different: the device already reassembled the message,
      * so a read returns what is queued and does not sit on it. */
     int coalesce = g_dev.ch_proto[ChannelID - 1] != TP2_0_PS;
+    /* 1.10: a message with others lost in front of it is the FIRST of the
+     * call that returns it, and that call returns ERR_BUFFER_OVERFLOW (SAE
+     * J2534-1: the messages read are valid, pNumMsgs counts them). So the
+     * application knows where the gap is without a status bit: in front of
+     * what this call returned. A call that is filling up stops before it. */
+    int overflow = 0;
     while (got < want) {
-        if (ring_pop(r, &pMsg[got])) { got++; continue; }
+        int lost = 0;
+        if (got > 0 && ring_next_lost(r)) break;
+        if (ring_pop(r, &pMsg[got], &lost)) { if (lost) overflow = 1; got++; continue; }
         if (!coalesce && got > 0) break;
         if (Timeout == 0 || !g_dev.connected) break;
         long left = (long)(deadline - GetTickCount());
@@ -949,6 +1073,13 @@ J2534_API PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
             log_line("PassThruReadMsgs: channel %lu rx_status 0x%lX ts %lu size %lu [%s]",
                      ChannelID, pMsg[i].RxStatus, pMsg[i].Timestamp, pMsg[i].DataSize,
                      hex_all(pMsg[i].Data, pMsg[i].DataSize, hx));
+        if (overflow) {
+            set_err("ERR_BUFFER_OVERFLOW (0x12): received messages were lost in front of the first message of this read "
+                    "(a receive buffer ran over; the driver log says where)");
+            log_line("PassThruReadMsgs: channel %lu: ERR_BUFFER_OVERFLOW with %lu message(s): others were lost in front of the first",
+                     ChannelID, got);
+            return ERR_BUFFER_OVERFLOW;
+        }
         return STATUS_NOERROR;
     }
     /* Nothing read: ERR_BUFFER_EMPTY whatever the Timeout, as 1.1 and the
