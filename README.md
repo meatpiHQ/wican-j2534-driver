@@ -55,7 +55,22 @@ tool timed out on its first request: the field report of 2026-10-19). A
 J1850 VPW PASSTHRU_MSG carries the 3-byte header and the payload whole, with
 no CAN-id prefix; the DLL passes it through the same way.
 
+ISO 15765 extended addressing (`ISO15765_ADDR_TYPE`, for an ECU behind a
+gateway that answers for several ECUs on one pair of ids) is the device's
+too: the DLL passes the flag, the fifth byte of a message and the 5-byte
+mask, pattern and flow-control message of a FLOW_CONTROL filter through
+as they are. WiCAN firmware from 6.0.0-beta.13 serves it; older firmware
+answers the flag `ERR_INVALID_MSG`. Driver 1.10 needs no change for it
+(the firmware's `.\test.ps1 j2534ext` calls the DLL like an application).
+
 ## Versions
+
+- **Not released yet (after 1.10)**: two texts of `PassThruGetLastError`
+  only, no change to a call. `ERR_INVALID_MSG` no longer says extended
+  addressing is not supported (firmware from 6.0.0-beta.13 serves it),
+  and `ERR_EXCEEDED_LIMIT` names the limits of both firmware generations
+  (10 filters; 10 ISO-TP sessions on a channel, 4 before 6.0.0-beta.13).
+  The DLL still calls itself 1.10.
 
 - **1.10 (2026-11-18)**: the return codes are SAE J2534-1's numbers, and
   lost messages are reported. Up to 1.9 seven return codes had the wrong

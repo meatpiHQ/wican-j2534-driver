@@ -595,8 +595,8 @@ static const char *device_status_text(long st)
     case 0x07: return "the WiCAN refused: ERR_FAILED (0x07): the CAN node is not transmitting (no bit rate proven on a silent bus with Automatic, a mismatch, listen-only: check /api/can), an ISO-TP send failed, or no free channel / periodic slot";
     case 0x08: return "the WiCAN refused: ERR_DEVICE_NOT_CONNECTED (0x08): CONNECT before OPEN";
     case 0x09: return "the WiCAN refused: ERR_TIMEOUT (0x09): the ISO-TP transfer timed out (no flow control or no answer from the ECU)";
-    case 0x0A: return "the WiCAN refused: ERR_INVALID_MSG (0x0A): malformed message (a CAN frame is the 4-byte id + 0..8 bytes, an ISO15765 message the id + the payload; extended addressing is not supported)";
-    case 0x0C: return "the WiCAN refused: ERR_EXCEEDED_LIMIT (0x0C): the channel's filter table (8) or its ISO-TP sessions (4) are full";
+    case 0x0A: return "the WiCAN refused: ERR_INVALID_MSG (0x0A): malformed message (a CAN frame is the 4-byte id + 0..8 bytes, an ISO15765 message the id + the payload, with ISO15765_ADDR_TYPE the id + the address extension + the payload; WiCAN firmware before 6.0.0-beta.13 refuses that flag)";
+    case 0x0C: return "the WiCAN refused: ERR_EXCEEDED_LIMIT (0x0C): the channel's filter table or its ISO-TP sessions are full (10 filters; 10 sessions, 4 on WiCAN firmware before 6.0.0-beta.13)";
     case ERR_DEVICE_IN_USE:
                return "the WiCAN refused: ERR_DEVICE_IN_USE (0x0E): another tester is attached (TCP, USB serial or BLE)";
     case ERR_MSG_PROTOCOL_ID:
