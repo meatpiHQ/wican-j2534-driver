@@ -70,7 +70,13 @@ answers the flag `ERR_INVALID_MSG`. Driver 1.10 needs no change for it
   addressing is not supported (firmware from 6.0.0-beta.13 serves it),
   and `ERR_EXCEEDED_LIMIT` names the limits of both firmware generations
   (10 filters; 10 ISO-TP sessions on a channel, 4 before 6.0.0-beta.13).
-  The DLL still calls itself 1.10.
+  The first wording of the `ERR_INVALID_MSG` text was 271 characters and
+  the DLL holds 255: it is shorter now. And the USB cable in the words of
+  the WiCAN's own web page: the installer's connection page, its closing
+  text, the manual's two tables and the text behind "no WiCAN COM port
+  found" name the two settings on the USB page ("Connector role" Device,
+  "USB device class" CDC serial or CDC-NCM) where they said "device/cdc
+  mode". The DLL still calls itself 1.10.
 
 - **1.10 (2026-11-18)**: the return codes are SAE J2534-1's numbers, and
   lost messages are reported. Up to 1.9 seven return codes had the wrong

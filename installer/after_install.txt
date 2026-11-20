@@ -16,9 +16,12 @@ Before first use, on the WiCAN itself:
     connections only from its own WiFi hotspot or the USB cable, not
     from a shared LAN. Leave it off unless you need the LAN.
 
-If you chose USB COM-port mode: set the WiCAN's USB role to
-device/cdc (web UI -> USB settings), reboot it, and plug it into this
-PC. The driver finds the WiCAN's COM port automatically.
+If you chose the USB cable: the WiCAN's USB port starts in the Host
+role, where this PC sees only the board's console ports. On the
+WiCAN's web page open the USB page, set "Connector role" to Device
+and "USB device class" to CDC serial (COM port) or CDC-NCM (network),
+submit (the device restarts), and plug it into this PC. In COM port
+mode the driver finds the WiCAN's port automatically.
 
 To change the connection the driver uses (e.g. after switching from USB
 to WiFi), simply re-run this installer: it remembers your current

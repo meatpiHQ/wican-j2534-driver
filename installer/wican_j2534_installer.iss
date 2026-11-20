@@ -129,8 +129,8 @@ begin
     'This sets the IP address the driver uses to reach the WiCAN. ' +
     'You can change it later by re-running this installer.',
     True, False);
-  TransportPage.Add('USB cable, network mode (recommended) - WiCAN in device/NCM mode, appears as a network adapter (192.168.82.1)');
-  TransportPage.Add('USB cable, COM-port mode - WiCAN in device/cdc mode, appears as a serial port (found automatically)');
+  TransportPage.Add('USB cable, network (recommended, 192.168.82.1): on the WiCAN set Connector role = Device, USB device class = CDC-NCM');
+  TransportPage.Add('USB cable, COM port (found automatically): on the WiCAN set Connector role = Device, USB device class = CDC serial');
   TransportPage.Add('WiCAN WiFi hotspot - this PC joins the WiCAN''s own WiFi network (192.168.80.1)');
   TransportPage.Add('Other - the WiCAN is on my WiFi/LAN, I''ll enter its IP address');
   TransportPage.SelectedValueIndex := 0;

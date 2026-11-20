@@ -160,8 +160,8 @@ Pick **one** transport. The only thing that changes downstream is the
 |---|---|---|
 | **WiCAN SoftAP** (simplest) | Join the WiCAN's own WiFi from the PC | **`192.168.80.1`** (AP gateway) |
 | **WiFi station** (shop LAN) | WiCAN joins your network | WiCAN's LAN IP (from your router / the Status screen) |
-| **USB-device (NCM)** — most reliable | Set `usb_host_manager.role=device`, `device_class=ncm`, reboot, plug USB into the PC | **`192.168.82.1`** (the USB link) |
-| **USB-device (COM port / CDC)** | Set `role=device`, `device_class=cdc`, reboot, plug USB into the PC | *(no IP — a serial COM port, found automatically)* |
+| **USB cable, network** (most reliable) | On the WiCAN's USB page set "Connector role" to Device and "USB device class" to CDC-NCM, submit (it restarts), plug USB into the PC | **`192.168.82.1`** (the USB link) |
+| **USB cable, COM port** | On the WiCAN's USB page set "Connector role" to Device and "USB device class" to CDC serial, submit (it restarts), plug USB into the PC | *(no IP: a serial COM port, found automatically)* |
 | **USB-Ethernet (host)** | A USB-Ethernet adapter on WiCAN's host port to your LAN | WiCAN's wired uplink IP |
 
 **USB-device (NCM) is the recommended path.** After setting NCM mode and
@@ -389,7 +389,7 @@ on the CAN bus (`tools/testbench/actors/pcan_reflash_ecu.py`, request
 | USB device won't start (Device Manager Code 10) | A previous MeatPi USB product's INF may claim the hardware id. WiCAN's device PID is **0x1262** to avoid this; remove the conflicting INF. One PID per USB function. |
 | PC never gets a USB-link IP (no DHCP) | The USB subnet must not overlap the AP subnet. WiCAN's USB link is `192.168.82.1/24`, separate from the `192.168.80.x` AP. |
 | Connection over the shop LAN is refused | `allow_lan` is `false` (the safe default) — WiFi-STA / USB-Ethernet connections are dropped. Use AP/USB-device, or set `allow_lan=true` if you accept the exposure. |
-| Serial mode: "no WiCAN COM port found" | The WiCAN isn't enumerated as a COM port. Check `role=device` + `device_class=cdc` is set and the device rebooted; look for "USB Serial Device (COMn)" in Device Manager (VID 16D0 PID 1263). |
+| Serial mode: "no WiCAN COM port found" | The WiCAN is not on this PC as a COM port. As shipped its USB port is in the Host role, and the PC then shows only the two COM ports of the board's USB bridge (the console and the OBD chip), which do not speak J2534. On the WiCAN's USB page set "Connector role" to Device and "USB device class" to CDC serial, submit and let it restart; look for "USB Serial Device (COMn)" in Device Manager (VID 16D0 PID 1263). |
 | Serial mode: COM port open failed | Another program has the port open (only one app at a time), or `ComPort` names the wrong port — set it to `auto`. |
 | Reflash services rejected (`0x34/36/37` fail), or `PassThruWriteMsgs` answers `NotSupported (0x01)` now and then on a **raw CAN** channel with `GetLastError` "no error" | Firmware before 2026-10-27 had an ECU-flashing gate (`allow_reflash`, default off) that refused those services and, on raw CAN, read every frame as ISO-TP and refused ordinary frames of tools with their own framing (VW TP 2.0) whose byte at the service position was `0x34..0x37`. Update the firmware (the gate is gone, every write is forwarded) and the driver (1.5 explains every refusal in `GetLastError`); on old firmware turn "Allow ECU flashing" on for that work. |
 | Data looks wrong / cross-talk on the bus | An `autopid` group polling the same bus can interleave with the tester. Disable autopid while running J2534. |
